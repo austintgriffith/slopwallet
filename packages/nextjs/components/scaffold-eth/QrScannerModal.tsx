@@ -13,6 +13,7 @@ export const QrScannerModal = ({ isOpen, onClose, onScan }: QrScannerModalProps)
   const [error, setError] = useState<string | null>(null);
   const [isStarting, setIsStarting] = useState(false);
   const scannerRef = useRef<Html5Qrcode | null>(null);
+  const isRunningRef = useRef(false);
   const containerRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -63,6 +64,9 @@ export const QrScannerModal = ({ isOpen, onClose, onScan }: QrScannerModalProps)
           },
         );
 
+        // Mark scanner as running
+        isRunningRef.current = true;
+
         if (mounted) {
           setIsStarting(false);
         }
@@ -79,28 +83,33 @@ export const QrScannerModal = ({ isOpen, onClose, onScan }: QrScannerModalProps)
 
     return () => {
       mounted = false;
-      // Cleanup scanner on unmount
-      if (scannerRef.current) {
+      // Cleanup scanner on unmount - only if it's actually running
+      if (scannerRef.current && isRunningRef.current) {
+        isRunningRef.current = false;
         scannerRef.current
           .stop()
           .then(() => {
             scannerRef.current?.clear();
+            scannerRef.current = null;
           })
-          .catch(err => {
-            console.error("Error stopping scanner:", err);
+          .catch(() => {
+            // Ignore - scanner may already be stopped
           });
       }
     };
   }, [isOpen, onScan]);
 
   const handleClose = async () => {
-    try {
-      if (scannerRef.current) {
+    // Only stop if scanner is actually running
+    if (scannerRef.current && isRunningRef.current) {
+      isRunningRef.current = false;
+      try {
         await scannerRef.current.stop();
         scannerRef.current.clear();
+      } catch {
+        // Ignore - scanner may already be stopped
       }
-    } catch (err) {
-      console.error("Error stopping scanner:", err);
+      scannerRef.current = null;
     }
     onClose();
   };

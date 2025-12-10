@@ -11,7 +11,7 @@ export type BaseConfig = {
 
 export type ScaffoldConfig = BaseConfig;
 
-export const DEFAULT_ALCHEMY_API_KEY = "cR4WnXePioePZ5fFrnSiR";
+export const DEFAULT_ALCHEMY_API_KEY = "Aq8HCX_tNtmOqH2zwqcerlNaO53Q4bss";
 
 const scaffoldConfig = {
   // The networks on which your DApp is live
