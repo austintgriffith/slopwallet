@@ -3,11 +3,24 @@
 import { useState } from "react";
 import { useParams } from "next/navigation";
 import { Address, AddressInput, Balance, EtherInput } from "@scaffold-ui/components";
-import { isAddress, parseEther } from "viem";
+import { formatUnits, isAddress, parseEther } from "viem";
+import { base } from "viem/chains";
 import { normalize } from "viem/ens";
 import { useAccount, useEnsAddress, useReadContract, useWriteContract } from "wagmi";
 import { WalletConnectSection } from "~~/components/scaffold-eth";
 import { SMART_WALLET_ABI } from "~~/contracts/SmartWalletAbi";
+
+// USDC on Base
+const USDC_ADDRESS_BASE = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913" as const;
+const ERC20_ABI = [
+  {
+    inputs: [{ name: "account", type: "address" }],
+    name: "balanceOf",
+    outputs: [{ name: "", type: "uint256" }],
+    stateMutability: "view",
+    type: "function",
+  },
+] as const;
 
 const WalletPage = () => {
   const params = useParams();
@@ -69,6 +82,18 @@ const WalletPage = () => {
     args: connectedAddress ? [connectedAddress] : undefined,
     query: {
       enabled: !!isValidAddress && !!connectedAddress,
+    },
+  });
+
+  // Read USDC balance on Base
+  const { data: usdcBalance, isLoading: usdcLoading } = useReadContract({
+    address: USDC_ADDRESS_BASE,
+    abi: ERC20_ABI,
+    functionName: "balanceOf",
+    args: isValidAddress ? [walletAddress as `0x${string}`] : undefined,
+    chainId: base.id,
+    query: {
+      enabled: !!isValidAddress,
     },
   });
 
@@ -189,6 +214,26 @@ const WalletPage = () => {
               <p className="text-sm font-medium opacity-60 mb-1">Balance</p>
               <div className="text-xl font-semibold">
                 <Balance address={walletAddress as `0x${string}`} />
+              </div>
+            </div>
+
+            {/* USDC Balance on Base */}
+            <div className="bg-base-100 rounded-xl p-4">
+              <p className="text-sm font-medium opacity-60 mb-1">USDC Balance (Base)</p>
+              <div className="text-xl font-semibold">
+                {usdcLoading ? (
+                  <span className="loading loading-spinner loading-sm"></span>
+                ) : usdcBalance !== undefined ? (
+                  <span>
+                    {parseFloat(formatUnits(usdcBalance, 6)).toLocaleString(undefined, {
+                      minimumFractionDigits: 2,
+                      maximumFractionDigits: 2,
+                    })}{" "}
+                    USDC
+                  </span>
+                ) : (
+                  <span className="opacity-60">Unable to load</span>
+                )}
               </div>
             </div>
 
