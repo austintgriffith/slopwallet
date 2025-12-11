@@ -1,12 +1,18 @@
 "use client";
 
 import { useState } from "react";
+import Image from "next/image";
 import { Address } from "@scaffold-ui/components";
 import { formatEther } from "viem";
-import { useAccount, useWalletClient, useWriteContract } from "wagmi";
+import { useAccount, usePublicClient, useWalletClient, useWriteContract } from "wagmi";
 import { QrScannerModal } from "~~/components/scaffold-eth/QrScannerModal";
 import { SMART_WALLET_ABI } from "~~/contracts/SmartWalletAbi";
-import { ActiveSession, SessionRequest, useWalletConnect } from "~~/hooks/scaffold-eth/useWalletConnect";
+import {
+  ActiveSession,
+  BatchCallStatus,
+  SessionRequest,
+  useWalletConnect,
+} from "~~/hooks/scaffold-eth/useWalletConnect";
 
 interface WalletConnectSectionProps {
   smartWalletAddress: string;
@@ -31,6 +37,7 @@ export const WalletConnectSection = ({ smartWalletAddress }: WalletConnectSectio
     clearRequest,
     approveRequest,
     rejectRequest,
+    updateBatchStatus,
     isReady,
   } = useWalletConnect({
     smartWalletAddress,
@@ -150,6 +157,7 @@ export const WalletConnectSection = ({ smartWalletAddress }: WalletConnectSectio
                 onApprove={approveRequest}
                 onReject={rejectRequest}
                 onClear={() => clearRequest(request.id)}
+                updateBatchStatus={updateBatchStatus}
               />
             ))}
           </div>
@@ -172,7 +180,14 @@ const ActiveSessionCard = ({ session, onDisconnect }: { session: ActiveSession; 
     <div className="flex items-center justify-between p-3 bg-base-200 rounded-lg">
       <div className="flex items-center gap-3">
         {session.peerMeta.icons?.[0] && (
-          <img src={session.peerMeta.icons[0]} alt={session.peerMeta.name} className="w-8 h-8 rounded-full" />
+          <Image
+            src={session.peerMeta.icons[0]}
+            alt={session.peerMeta.name}
+            width={32}
+            height={32}
+            className="w-8 h-8 rounded-full"
+            unoptimized
+          />
         )}
         <div>
           <p className="font-medium">{session.peerMeta.name}</p>
@@ -193,17 +208,20 @@ const SessionRequestCard = ({
   onApprove,
   onReject,
   onClear,
+  updateBatchStatus,
 }: {
   request: SessionRequest;
   smartWalletAddress: string;
   onApprove: (requestId: number, topic: string, result: string) => Promise<void>;
   onReject: (requestId: number, topic: string) => Promise<void>;
   onClear: () => void;
+  updateBatchStatus: (batchId: string, updates: Partial<BatchCallStatus>) => void;
 }) => {
   const [isExecuting, setIsExecuting] = useState(false);
   const [txError, setTxError] = useState<string | null>(null);
 
   const { writeContractAsync } = useWriteContract();
+  const publicClient = usePublicClient();
 
   const getMethodLabel = (method: string) => {
     switch (method) {
@@ -245,8 +263,6 @@ const SessionRequestCard = ({
           data: (call.data || "0x") as `0x${string}`,
         }));
 
-        console.log("Executing batch calls via SmartWallet.batchExec:", calls);
-
         txHash = await writeContractAsync({
           address: smartWalletAddress as `0x${string}`,
           abi: SMART_WALLET_ABI,
@@ -259,8 +275,6 @@ const SessionRequestCard = ({
         const target = (request.params.to || "0x0000000000000000000000000000000000000000") as `0x${string}`;
         const data = (request.params.data || "0x") as `0x${string}`;
 
-        console.log("Executing transaction via SmartWallet.exec:", { target, value: value.toString(), data });
-
         txHash = await writeContractAsync({
           address: smartWalletAddress as `0x${string}`,
           abi: SMART_WALLET_ABI,
@@ -271,11 +285,68 @@ const SessionRequestCard = ({
 
       console.log("Transaction sent:", txHash);
 
-      // Send the transaction hash back to the dApp
-      await onApprove(request.id, request.topic, txHash);
+      // Handle EIP-5792 wallet_sendCalls differently
+      if (isBatchCall && request.batchId) {
+        if (!publicClient) {
+          console.error("Public client not available, cannot fetch receipt");
+          updateBatchStatus(request.batchId, {
+            status: 500,
+            txHash,
+          });
+          onClear();
+          return;
+        }
+
+        try {
+          const receipt = await publicClient.waitForTransactionReceipt({
+            hash: txHash as `0x${string}`,
+          });
+
+          // Format receipt according to EIP-5792 spec
+          const formattedReceipt = {
+            logs: receipt.logs.map(log => ({
+              address: log.address,
+              data: log.data,
+              topics: log.topics,
+            })),
+            status: receipt.status === "success" ? "0x1" : "0x0",
+            blockHash: receipt.blockHash,
+            blockNumber: `0x${receipt.blockNumber.toString(16)}`,
+            gasUsed: `0x${receipt.gasUsed.toString(16)}`,
+            transactionHash: receipt.transactionHash,
+          };
+
+          updateBatchStatus(request.batchId, {
+            status: 200,
+            txHash,
+            receipts: [formattedReceipt],
+          });
+
+          console.log("✅ Batch transaction confirmed");
+        } catch (receiptError) {
+          console.error("Failed to get transaction receipt:", receiptError);
+          updateBatchStatus(request.batchId, {
+            status: 500,
+            txHash,
+          });
+        }
+
+        // Just remove the request from UI
+        onClear();
+      } else {
+        // For regular eth_sendTransaction, send the transaction hash back to the dApp
+        await onApprove(request.id, request.topic, txHash);
+      }
     } catch (err) {
       console.error("Transaction failed:", err);
       setTxError(err instanceof Error ? err.message : "Transaction failed");
+
+      // Update batch status to failed if this is a wallet_sendCalls request
+      if (isBatchCall && request.batchId) {
+        updateBatchStatus(request.batchId, {
+          status: 500, // Chain rules failure
+        });
+      }
     } finally {
       setIsExecuting(false);
     }
@@ -284,7 +355,15 @@ const SessionRequestCard = ({
   const handleReject = async () => {
     setIsExecuting(true);
     try {
-      await onReject(request.id, request.topic);
+      // Handle EIP-5792 wallet_sendCalls rejection
+      if (isBatchCall && request.batchId) {
+        updateBatchStatus(request.batchId, {
+          status: 400, // User rejected
+        });
+        onClear();
+      } else {
+        await onReject(request.id, request.topic);
+      }
     } catch (err) {
       console.error("Failed to reject:", err);
     } finally {
@@ -298,7 +377,14 @@ const SessionRequestCard = ({
       <div className="flex items-center justify-between mb-3">
         <div className="flex items-center gap-2">
           {request.peerMeta?.icons?.[0] && (
-            <img src={request.peerMeta.icons[0]} alt={request.peerMeta.name} className="w-6 h-6 rounded-full" />
+            <Image
+              src={request.peerMeta.icons[0]}
+              alt={request.peerMeta.name}
+              width={24}
+              height={24}
+              className="w-6 h-6 rounded-full"
+              unoptimized
+            />
           )}
           <span className="font-medium">{request.peerMeta?.name || "Unknown dApp"}</span>
         </div>
@@ -351,6 +437,12 @@ const SessionRequestCard = ({
       {isBatchCall && request.calls && (
         <div className="space-y-3">
           <div className="text-sm opacity-60">{request.calls.length} call(s) in batch</div>
+          {request.batchId && (
+            <div className="bg-base-200 rounded p-2">
+              <div className="text-xs opacity-60 mb-1">Batch ID (EIP-5792):</div>
+              <div className="font-mono text-xs break-all">{request.batchId}</div>
+            </div>
+          )}
           {request.calls.map((call, index) => (
             <div key={index} className="bg-base-300 rounded-lg p-3 space-y-2 text-sm">
               <div className="font-medium opacity-70">Call {index + 1}</div>

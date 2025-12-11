@@ -40,6 +40,41 @@ export const ScaffoldEthAppWithProviders = ({ children }: { children: React.Reac
 
   useEffect(() => {
     setMounted(true);
+
+    // Suppress chrome.runtime.sendMessage errors from wallet detection
+    // This is a harmless error from wallet connectors trying to detect browser extensions
+    const originalError = console.error;
+    console.error = (...args) => {
+      // Check if this is the chrome.runtime.sendMessage error
+      if (
+        args[0]?.message?.includes?.("chrome.runtime.sendMessage") ||
+        args[0]?.toString?.()?.includes?.("chrome.runtime.sendMessage") ||
+        args[1]?.message?.includes?.("chrome.runtime.sendMessage") ||
+        args[1]?.toString?.()?.includes?.("chrome.runtime.sendMessage")
+      ) {
+        // Suppress this specific error
+        return;
+      }
+      // Let all other errors through
+      originalError.apply(console, args);
+    };
+
+    // Also suppress unhandled promise rejections with this error
+    const handleUnhandledRejection = (event: PromiseRejectionEvent) => {
+      if (
+        event.reason?.message?.includes?.("chrome.runtime.sendMessage") ||
+        event.reason?.toString?.()?.includes?.("chrome.runtime.sendMessage")
+      ) {
+        event.preventDefault();
+      }
+    };
+
+    window.addEventListener("unhandledrejection", handleUnhandledRejection);
+
+    return () => {
+      console.error = originalError;
+      window.removeEventListener("unhandledrejection", handleUnhandledRejection);
+    };
   }, []);
 
   return (

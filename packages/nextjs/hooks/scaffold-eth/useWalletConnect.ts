@@ -26,6 +26,8 @@ const SUPPORTED_METHODS = [
   "eth_sendTransaction",
   "wallet_sendCalls",
   "wallet_getCapabilities",
+  "wallet_getCallsStatus",
+  "wallet_showCallsStatus",
   // Compatibility - return wallet address
   "eth_accounts",
   "eth_requestAccounts",
@@ -57,6 +59,8 @@ export interface SessionRequest {
   params: CallParams;
   // For wallet_sendCalls (EIP-5792) - array of calls
   calls?: CallParams[];
+  // Batch ID for wallet_sendCalls (EIP-5792)
+  batchId?: string;
   timestamp: number;
   peerMeta?: {
     name: string;
@@ -64,6 +68,27 @@ export interface SessionRequest {
     url?: string;
     icons?: string[];
   };
+}
+
+// EIP-5792 Batch Call Status
+export interface BatchCallStatus {
+  batchId: string;
+  chainId: string;
+  status: number; // 100=pending, 200=confirmed, 400=failed, 500=reverted, 600=partial
+  atomic: boolean;
+  txHash?: string;
+  receipts?: {
+    logs: {
+      address: string;
+      data: string;
+      topics: string[];
+    }[];
+    status: string;
+    blockHash: string;
+    blockNumber: string;
+    gasUsed: string;
+    transactionHash: string;
+  }[];
 }
 
 export interface ActiveSession {
@@ -100,6 +125,8 @@ export const useWalletConnect = ({
 
   const initializingRef = useRef(false);
   const walletKitRef = useRef<WalletKitInstance | null>(null);
+  // EIP-5792: Track batch call statuses - use Ref to persist across renders
+  const batchStatusesRef = useRef<Map<string, BatchCallStatus>>(new Map());
 
   // Initialize WalletKit
   useEffect(() => {
@@ -164,15 +191,9 @@ export const useWalletConnect = ({
 
     // Handle session proposals - auto approve
     const handleSessionProposal = async (proposal: WalletKitTypes.SessionProposal) => {
-      console.log("Session proposal received:", proposal);
-
       const { id, params } = proposal;
 
-      // Debug: Log what the dApp is requesting
-      console.log("=== WalletConnect Session Debug ===");
-      console.log("dApp requested namespaces:", JSON.stringify(params.requiredNamespaces, null, 2));
-      console.log("dApp optional namespaces:", JSON.stringify(params.optionalNamespaces, null, 2));
-      console.log("Our SUPPORTED_METHODS:", SUPPORTED_METHODS);
+      console.log("WalletConnect session proposal from:", params.proposer?.metadata?.name || "Unknown");
 
       try {
         const ourSupportedNamespaces = {
@@ -183,42 +204,17 @@ export const useWalletConnect = ({
             accounts: SUPPORTED_CHAIN_IDS.map(chainId => `eip155:${chainId}:${smartWalletAddress}`),
           },
         };
-        console.log("Our supported namespaces:", JSON.stringify(ourSupportedNamespaces, null, 2));
-
         const approvedNamespaces = buildApprovedNamespaces({
           proposal: params,
           supportedNamespaces: ourSupportedNamespaces,
         });
-
-        // Debug: Log what actually gets approved
-        console.log("=== APPROVED NAMESPACES (sent to dApp) ===");
-        console.log(JSON.stringify(approvedNamespaces, null, 2));
-        console.log("Approved methods:", approvedNamespaces.eip155?.methods);
-        console.log("wallet_sendCalls included?", approvedNamespaces.eip155?.methods?.includes("wallet_sendCalls"));
-        console.log(
-          "wallet_getCapabilities included?",
-          approvedNamespaces.eip155?.methods?.includes("wallet_getCapabilities"),
-        );
-
-        // Check if dApp requested these methods
-        const dAppRequestedMethods = [
-          ...(params.requiredNamespaces?.eip155?.methods || []),
-          ...(params.optionalNamespaces?.eip155?.methods || []),
-        ];
-        console.log("=== dApp REQUESTED these methods ===");
-        console.log("wallet_sendCalls requested?", dAppRequestedMethods.includes("wallet_sendCalls"));
-        console.log("wallet_getCapabilities requested?", dAppRequestedMethods.includes("wallet_getCapabilities"));
-        console.log("All requested methods:", dAppRequestedMethods);
 
         const session = await walletKit.approveSession({
           id,
           namespaces: approvedNamespaces,
         });
 
-        console.log("✅ Session approved successfully!");
-        console.log("Session topic:", session.topic);
-        console.log("Session namespaces:", JSON.stringify(session.namespaces, null, 2));
-        console.log("=== SESSION READY - dApp should now call wallet_getCapabilities ===");
+        console.log("✅ WalletConnect session approved:", session.topic);
 
         // Update active sessions
         setActiveSessions(prev => [
@@ -249,86 +245,136 @@ export const useWalletConnect = ({
 
     // Handle session requests
     const handleSessionRequest = async (event: WalletKitTypes.SessionRequest) => {
-      console.log("Session request received:", event);
-
       const { id, topic, params } = event;
       const { request, chainId } = params;
 
-      // Debug: Log what method the dApp is calling
-      console.log("=== Incoming Request Debug ===");
-      console.log("Method:", request.method);
-      console.log("Chain:", chainId);
-      console.log("Raw params:", JSON.stringify(request.params, null, 2));
-      console.log("Full request object:", JSON.stringify(request, null, 2));
+      console.log(`WalletConnect request: ${request.method}`);
 
       // Handle wallet_getCapabilities - auto-respond with our capabilities (EIP-5792)
       if (request.method === "wallet_getCapabilities") {
-        console.log("=== Responding to wallet_getCapabilities ===");
-        console.log("Requested for address:", request.params?.[0] || "no address specified");
-
         // Build capabilities for all supported chains
-        // Format based on Base/Coinbase docs: atomic.supported = "supported" (string, not boolean!)
-        // See: https://docs.base.org/base-account/reference/provider/methods/wallet_getCapabilities
-        const capabilities: Record<string, Record<string, { supported: string | boolean }>> = {};
+        const capabilities: Record<string, Record<string, any>> = {};
         for (const supportedChainId of SUPPORTED_CHAIN_IDS) {
-          // Hex chain ID format required by EIP-5792: "0x2105" for Base, etc.
           const hexChainId = `0x${supportedChainId.toString(16)}`;
           capabilities[hexChainId] = {
-            // "atomic" is the capability name used by Base/Coinbase/Uniswap
-            // value should be string "supported" according to their docs
-            atomic: { supported: "supported" },
-            // Also include atomicBatch for EIP-5792 standard compliance
-            atomicBatch: { supported: true },
-            // ERC-1271 signature validation support
-            // Smart wallet can validate signatures on-chain via isValidSignature
-            erc1271: { supported: true },
+            atomic: {
+              status: "supported",
+            },
           };
         }
 
-        console.log("=== CAPABILITIES RESPONSE ===");
-        console.log("Capabilities object:", capabilities);
-        console.log("JSON stringified:", JSON.stringify(capabilities, null, 2));
-        console.log("NOTE: Using 'atomic' with string 'supported' per Base/Coinbase docs");
+        try {
+          await walletKit.respondSessionRequest({
+            topic,
+            response: { id, result: capabilities, jsonrpc: "2.0" as const },
+          });
+        } catch (err) {
+          console.error("Failed to send wallet_getCapabilities response:", err);
+        }
+        return;
+      }
 
-        // Respond directly without user interaction
-        const response = { id, result: capabilities, jsonrpc: "2.0" as const };
-        console.log("Full WalletConnect response:", JSON.stringify(response, null, 2));
+      // Handle wallet_getCallsStatus - return status of a batch call (EIP-5792)
+      if (request.method === "wallet_getCallsStatus") {
+        const batchId = request.params?.[0];
+        const batchStatus = batchStatusesRef.current.get(batchId);
+
+        if (!batchStatus) {
+          console.error("Batch ID not found:", batchId);
+          try {
+            await walletKit.respondSessionRequest({
+              topic,
+              response: {
+                id,
+                jsonrpc: "2.0" as const,
+                error: {
+                  code: 5730, // Unknown bundle id (per EIP-5792)
+                  message: "Unknown batch id",
+                },
+              },
+            });
+          } catch (err) {
+            console.error("Failed to send error response:", err);
+          }
+          return;
+        }
+
+        // Build EIP-5792 compliant response
+        const statusResponse = {
+          version: "2.0.0",
+          id: batchStatus.batchId,
+          chainId: batchStatus.chainId,
+          status: batchStatus.status,
+          atomic: batchStatus.atomic,
+          ...(batchStatus.receipts && { receipts: batchStatus.receipts }),
+        };
 
         try {
-          await walletKit.respondSessionRequest({ topic, response });
-          console.log("✅ wallet_getCapabilities response sent successfully!");
+          await walletKit.respondSessionRequest({
+            topic,
+            response: { id, result: statusResponse, jsonrpc: "2.0" as const },
+          });
         } catch (err) {
-          console.error("❌ Failed to send wallet_getCapabilities response:", err);
+          console.error("Failed to send wallet_getCallsStatus response:", err);
+        }
+        return;
+      }
+
+      // Handle wallet_showCallsStatus - show UI for batch status (EIP-5792)
+      if (request.method === "wallet_showCallsStatus") {
+        const batchId = request.params?.[0];
+        const batchStatus = batchStatusesRef.current.get(batchId);
+
+        if (!batchStatus) {
+          console.error("Batch ID not found:", batchId);
+          try {
+            await walletKit.respondSessionRequest({
+              topic,
+              response: {
+                id,
+                jsonrpc: "2.0" as const,
+                error: {
+                  code: 5730,
+                  message: "Unknown batch id",
+                },
+              },
+            });
+          } catch (err) {
+            console.error("Failed to send error response:", err);
+          }
+          return;
+        }
+
+        try {
+          await walletKit.respondSessionRequest({
+            topic,
+            response: { id, result: null, jsonrpc: "2.0" as const },
+          });
+        } catch (err) {
+          console.error("Failed to send wallet_showCallsStatus response:", err);
         }
         return;
       }
 
       // Handle eth_accounts and eth_requestAccounts - return the smart wallet address
       if (request.method === "eth_accounts" || request.method === "eth_requestAccounts") {
-        console.log(`=== Responding to ${request.method} ===`);
         const accounts = [smartWalletAddress];
-        console.log("Returning accounts:", accounts);
 
         try {
           await walletKit.respondSessionRequest({
             topic,
             response: { id, result: accounts, jsonrpc: "2.0" as const },
           });
-          console.log(`✅ ${request.method} response sent successfully!`);
         } catch (err) {
-          console.error(`❌ Failed to send ${request.method} response:`, err);
+          console.error(`Failed to send ${request.method} response:`, err);
         }
         return;
       }
 
       // Handle signing methods - use owner's EOA to sign (ERC-1271 support)
       if (["personal_sign", "eth_sign", "eth_signTypedData", "eth_signTypedData_v4"].includes(request.method)) {
-        console.log(`=== Received signing request: ${request.method} ===`);
-        console.log("Params:", request.params);
-
-        // Check if we have a wallet client to sign with
         if (!walletClient || !ownerAddress) {
-          console.log("❌ No wallet client or owner address available for signing");
+          console.error("No wallet client or owner address available for signing");
           try {
             await walletKit.respondSessionRequest({
               topic,
@@ -351,28 +397,19 @@ export const useWalletConnect = ({
           let signature: string;
 
           if (request.method === "personal_sign") {
-            // personal_sign: params are [message, address]
             const [message] = request.params;
-            console.log("Signing message with personal_sign:", message);
-
             signature = await walletClient.signMessage({
               account: ownerAddress as `0x${string}`,
               message: typeof message === "string" ? message : { raw: message },
             });
           } else if (request.method === "eth_sign") {
-            // eth_sign: params are [address, data]
             const [, data] = request.params;
-            console.log("Signing data with eth_sign:", data);
-
             signature = await walletClient.signMessage({
               account: ownerAddress as `0x${string}`,
               message: { raw: data as `0x${string}` },
             });
           } else if (request.method === "eth_signTypedData" || request.method === "eth_signTypedData_v4") {
-            // eth_signTypedData: params are [address, typedData]
             const [, typedData] = request.params;
-            console.log("Signing typed data:", typedData);
-
             const parsedTypedData = typeof typedData === "string" ? JSON.parse(typedData) : typedData;
 
             signature = await walletClient.signTypedData({
@@ -386,18 +423,12 @@ export const useWalletConnect = ({
             throw new Error("Unsupported signing method");
           }
 
-          console.log("✅ Signature created:", signature);
-          console.log("Note: This signature can be verified on-chain via ERC-1271 isValidSignature");
-
-          // Send signature back to dApp
           await walletKit.respondSessionRequest({
             topic,
             response: { id, result: signature, jsonrpc: "2.0" as const },
           });
-
-          console.log(`✅ ${request.method} signature response sent successfully!`);
         } catch (err) {
-          console.error(`❌ Failed to sign with ${request.method}:`, err);
+          console.error(`Failed to sign with ${request.method}:`, err);
 
           // Send error response
           try {
@@ -419,19 +450,14 @@ export const useWalletConnect = ({
         return;
       }
 
-      // Log if we receive wallet_sendCalls
-      if (request.method === "wallet_sendCalls") {
-        console.log("🎉🎉🎉 RECEIVED wallet_sendCalls! 🎉🎉🎉");
-        console.log("This means batching is working!");
-      }
-
-      // Log any other wallet_* methods we might not be handling
+      // Log any unhandled wallet_* methods
       if (
         request.method.startsWith("wallet_") &&
-        !["wallet_sendCalls", "wallet_getCapabilities"].includes(request.method)
+        !["wallet_sendCalls", "wallet_getCapabilities", "wallet_getCallsStatus", "wallet_showCallsStatus"].includes(
+          request.method,
+        )
       ) {
-        console.log("⚠️ Received unhandled wallet method:", request.method);
-        console.log("We may need to implement this for full EIP-5792 support");
+        console.warn("Unhandled wallet method:", request.method);
       }
 
       // Get peer metadata
@@ -447,7 +473,6 @@ export const useWalletConnect = ({
 
       // Handle wallet_sendCalls (EIP-5792) differently
       if (request.method === "wallet_sendCalls") {
-        // wallet_sendCalls format: { version, chainId, from, calls: [{ to, value, data }, ...] }
         const calls: CallParams[] = (requestParams?.calls || []).map(
           (call: { to?: string; value?: string; data?: string }) => ({
             to: call.to,
@@ -456,20 +481,53 @@ export const useWalletConnect = ({
           }),
         );
 
+        // Generate unique batch ID (EIP-5792 requirement)
+        const batchId = `0x${Date.now().toString(16).padStart(16, "0")}${Math.random().toString(16).slice(2).padStart(48, "0")}`;
+        const requestChainId = requestParams?.chainId || chainId;
+
+        // Create session request with batch ID
         const sessionRequest: SessionRequest = {
           id,
           topic,
           method: request.method,
-          chainId: requestParams?.chainId || chainId,
+          chainId: requestChainId,
           params: {
             from: requestParams?.from,
           },
           calls,
+          batchId,
           timestamp: Date.now(),
           peerMeta,
         };
 
+        // Initialize batch status as pending
+        const initialStatus: BatchCallStatus = {
+          batchId,
+          chainId: requestChainId,
+          status: 100, // Pending
+          atomic: true,
+        };
+
+        batchStatusesRef.current.set(batchId, initialStatus);
+        console.log("wallet_sendCalls batch created:", batchId);
+
+        // Queue the request for user approval
         setSessionRequests(prev => [...prev, sessionRequest]);
+
+        // Respond immediately with batch ID (EIP-5792 requirement)
+        try {
+          await walletKit.respondSessionRequest({
+            topic,
+            response: {
+              id,
+              result: { id: batchId },
+              jsonrpc: "2.0" as const,
+            },
+          });
+        } catch (err) {
+          console.error("Failed to send wallet_sendCalls response:", err);
+        }
+
         return;
       }
 
@@ -643,6 +701,22 @@ export const useWalletConnect = ({
     [walletKit],
   );
 
+  // Update batch status (for EIP-5792)
+  const updateBatchStatus = useCallback((batchId: string, updates: Partial<BatchCallStatus>) => {
+    const current = batchStatusesRef.current.get(batchId);
+    if (!current) {
+      console.error("Cannot update batch status - batch ID not found:", batchId);
+      return;
+    }
+
+    const updated = { ...current, ...updates };
+    batchStatusesRef.current.set(batchId, updated);
+
+    if (current.status !== updated.status) {
+      console.log(`Batch status updated: ${current.status} → ${updated.status}`);
+    }
+  }, []);
+
   return {
     status,
     error,
@@ -651,9 +725,11 @@ export const useWalletConnect = ({
     disconnectAll,
     sessionRequests,
     activeSessions,
+    batchStatuses: batchStatusesRef.current,
     clearRequest,
     approveRequest,
     rejectRequest,
+    updateBatchStatus,
     isReady: status === "ready" || status === "connected",
     isConnected: status === "connected",
   };
