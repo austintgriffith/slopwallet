@@ -43,6 +43,16 @@ export const SMART_WALLET_ABI = [
   },
   {
     type: "function",
+    name: "isValidSignature",
+    inputs: [
+      { name: "hash", type: "bytes32" },
+      { name: "signature", type: "bytes" },
+    ],
+    outputs: [{ name: "magicValue", type: "bytes4" }],
+    stateMutability: "view",
+  },
+  {
+    type: "function",
     name: "operators",
     inputs: [{ name: "", type: "address" }],
     outputs: [{ name: "", type: "bool" }],
@@ -106,6 +116,17 @@ export const SMART_WALLET_ABI = [
       { name: "newOwner", type: "address", indexed: true },
     ],
     anonymous: false,
+  },
+  { type: "error", name: "ECDSAInvalidSignature", inputs: [] },
+  {
+    type: "error",
+    name: "ECDSAInvalidSignatureLength",
+    inputs: [{ name: "length", type: "uint256" }],
+  },
+  {
+    type: "error",
+    name: "ECDSAInvalidSignatureS",
+    inputs: [{ name: "s", type: "bytes32" }],
   },
   { type: "error", name: "ExecutionFailed", inputs: [] },
   { type: "error", name: "NotAuthorized", inputs: [] },

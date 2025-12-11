@@ -3,7 +3,7 @@
 import { useState } from "react";
 import { Address } from "@scaffold-ui/components";
 import { formatEther } from "viem";
-import { useWriteContract } from "wagmi";
+import { useAccount, useWalletClient, useWriteContract } from "wagmi";
 import { QrScannerModal } from "~~/components/scaffold-eth/QrScannerModal";
 import { SMART_WALLET_ABI } from "~~/contracts/SmartWalletAbi";
 import { ActiveSession, SessionRequest, useWalletConnect } from "~~/hooks/scaffold-eth/useWalletConnect";
@@ -15,6 +15,10 @@ interface WalletConnectSectionProps {
 export const WalletConnectSection = ({ smartWalletAddress }: WalletConnectSectionProps) => {
   const [wcUri, setWcUri] = useState("");
   const [isScanning, setIsScanning] = useState(false);
+
+  // Get wallet client and owner address for signing
+  const { address: ownerAddress } = useAccount();
+  const { data: walletClient } = useWalletClient();
 
   const {
     status,
@@ -28,7 +32,12 @@ export const WalletConnectSection = ({ smartWalletAddress }: WalletConnectSectio
     approveRequest,
     rejectRequest,
     isReady,
-  } = useWalletConnect({ smartWalletAddress, enabled: true });
+  } = useWalletConnect({
+    smartWalletAddress,
+    walletClient,
+    ownerAddress,
+    enabled: true,
+  });
 
   const handlePaste = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const value = e.target.value;

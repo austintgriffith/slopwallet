@@ -2,13 +2,16 @@
 pragma solidity >=0.8.0 <0.9.0;
 
 import "@openzeppelin/contracts/access/Ownable.sol";
+import "@openzeppelin/contracts/interfaces/IERC1271.sol";
+import "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
 
 /**
  * @title SmartWallet
  * @notice A minimal smart contract wallet that allows an owner to execute arbitrary calls
+ * @notice Supports ERC-1271 signature validation for off-chain signing
  * @author BuidlGuidl
  */
-contract SmartWallet is Ownable {
+contract SmartWallet is Ownable, IERC1271 {
     struct Call {
         address target;
         uint256 value;
@@ -85,6 +88,29 @@ contract SmartWallet is Ownable {
             emit Executed(calls[i].target, calls[i].value, calls[i].data);
             results[i] = returnData;
         }
+    }
+
+    /**
+     * @notice ERC-1271 signature validation
+     * @dev Validates that the signature was created by the owner or an operator
+     * @param hash The hash of the data that was signed
+     * @param signature The signature bytes (ECDSA signature)
+     * @return magicValue The magic value 0x1626ba7e if valid, 0xffffffff otherwise
+     */
+    function isValidSignature(bytes32 hash, bytes memory signature) 
+        external 
+        view 
+        returns (bytes4 magicValue) 
+    {
+        // Recover the signer from the signature
+        address signer = ECDSA.recover(hash, signature);
+        
+        // Check if signer is owner or operator
+        if (signer == owner() || operators[signer]) {
+            return IERC1271.isValidSignature.selector; // 0x1626ba7e
+        }
+        
+        return 0xffffffff; // Invalid signature
     }
 
     /**

@@ -4,6 +4,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { WalletKit, WalletKitTypes } from "@reown/walletkit";
 import { Core } from "@walletconnect/core";
 import { buildApprovedNamespaces, getSdkError } from "@walletconnect/utils";
+import type { WalletClient } from "viem";
 import scaffoldConfig from "~~/scaffold.config";
 
 // Type for WalletKit instance
@@ -28,8 +29,9 @@ const SUPPORTED_METHODS = [
   // Compatibility - return wallet address
   "eth_accounts",
   "eth_requestAccounts",
-  // Signing methods - advertise so WC allows requests through
-  // (we'll respond with error since SCW can't sign without private key)
+  // Signing methods - now supported via ERC-1271
+  // Owner's EOA signs off-chain, signature can be verified on-chain via isValidSignature
+  "personal_sign",
   "eth_sign",
   "eth_signTypedData",
   "eth_signTypedData_v4",
@@ -79,10 +81,17 @@ type ConnectionStatus = "idle" | "initializing" | "ready" | "pairing" | "connect
 
 interface UseWalletConnectOptions {
   smartWalletAddress: string;
+  walletClient?: WalletClient;
+  ownerAddress?: string;
   enabled?: boolean;
 }
 
-export const useWalletConnect = ({ smartWalletAddress, enabled = true }: UseWalletConnectOptions) => {
+export const useWalletConnect = ({
+  smartWalletAddress,
+  walletClient,
+  ownerAddress,
+  enabled = true,
+}: UseWalletConnectOptions) => {
   const [walletKit, setWalletKit] = useState<WalletKitInstance | null>(null);
   const [status, setStatus] = useState<ConnectionStatus>("idle");
   const [error, setError] = useState<string | null>(null);
@@ -270,6 +279,9 @@ export const useWalletConnect = ({ smartWalletAddress, enabled = true }: UseWall
             atomic: { supported: "supported" },
             // Also include atomicBatch for EIP-5792 standard compliance
             atomicBatch: { supported: true },
+            // ERC-1271 signature validation support
+            // Smart wallet can validate signatures on-chain via isValidSignature
+            erc1271: { supported: true },
           };
         }
 
@@ -309,26 +321,100 @@ export const useWalletConnect = ({ smartWalletAddress, enabled = true }: UseWall
         return;
       }
 
-      // Handle signing methods - respond with error (SCW can't sign without private key)
-      if (["eth_sign", "eth_signTypedData", "eth_signTypedData_v4"].includes(request.method)) {
+      // Handle signing methods - use owner's EOA to sign (ERC-1271 support)
+      if (["personal_sign", "eth_sign", "eth_signTypedData", "eth_signTypedData_v4"].includes(request.method)) {
         console.log(`=== Received signing request: ${request.method} ===`);
-        console.log("Smart contract wallets cannot sign - responding with error");
+        console.log("Params:", request.params);
+
+        // Check if we have a wallet client to sign with
+        if (!walletClient || !ownerAddress) {
+          console.log("❌ No wallet client or owner address available for signing");
+          try {
+            await walletKit.respondSessionRequest({
+              topic,
+              response: {
+                id,
+                jsonrpc: "2.0" as const,
+                error: {
+                  code: 4100,
+                  message: "Owner wallet not connected. Connect the owner's wallet to sign messages.",
+                },
+              },
+            });
+          } catch (err) {
+            console.error("Failed to send error response:", err);
+          }
+          return;
+        }
 
         try {
+          let signature: string;
+
+          if (request.method === "personal_sign") {
+            // personal_sign: params are [message, address]
+            const [message] = request.params;
+            console.log("Signing message with personal_sign:", message);
+
+            signature = await walletClient.signMessage({
+              account: ownerAddress as `0x${string}`,
+              message: typeof message === "string" ? message : { raw: message },
+            });
+          } else if (request.method === "eth_sign") {
+            // eth_sign: params are [address, data]
+            const [, data] = request.params;
+            console.log("Signing data with eth_sign:", data);
+
+            signature = await walletClient.signMessage({
+              account: ownerAddress as `0x${string}`,
+              message: { raw: data as `0x${string}` },
+            });
+          } else if (request.method === "eth_signTypedData" || request.method === "eth_signTypedData_v4") {
+            // eth_signTypedData: params are [address, typedData]
+            const [, typedData] = request.params;
+            console.log("Signing typed data:", typedData);
+
+            const parsedTypedData = typeof typedData === "string" ? JSON.parse(typedData) : typedData;
+
+            signature = await walletClient.signTypedData({
+              account: ownerAddress as `0x${string}`,
+              domain: parsedTypedData.domain,
+              types: parsedTypedData.types,
+              primaryType: parsedTypedData.primaryType,
+              message: parsedTypedData.message,
+            });
+          } else {
+            throw new Error("Unsupported signing method");
+          }
+
+          console.log("✅ Signature created:", signature);
+          console.log("Note: This signature can be verified on-chain via ERC-1271 isValidSignature");
+
+          // Send signature back to dApp
           await walletKit.respondSessionRequest({
             topic,
-            response: {
-              id,
-              jsonrpc: "2.0" as const,
-              error: {
-                code: 4200,
-                message: "Smart contract wallets cannot sign messages. Use on-chain verification instead.",
-              },
-            },
+            response: { id, result: signature, jsonrpc: "2.0" as const },
           });
-          console.log(`✅ ${request.method} error response sent`);
+
+          console.log(`✅ ${request.method} signature response sent successfully!`);
         } catch (err) {
-          console.error(`❌ Failed to send ${request.method} error response:`, err);
+          console.error(`❌ Failed to sign with ${request.method}:`, err);
+
+          // Send error response
+          try {
+            await walletKit.respondSessionRequest({
+              topic,
+              response: {
+                id,
+                jsonrpc: "2.0" as const,
+                error: {
+                  code: 4001,
+                  message: err instanceof Error ? err.message : "User rejected signature request",
+                },
+              },
+            });
+          } catch (responseErr) {
+            console.error("Failed to send error response:", responseErr);
+          }
         }
         return;
       }
@@ -431,7 +517,7 @@ export const useWalletConnect = ({ smartWalletAddress, enabled = true }: UseWall
       walletKit.off("session_request", handleSessionRequest);
       walletKit.off("session_delete", handleSessionDelete);
     };
-  }, [walletKit, smartWalletAddress]);
+  }, [walletKit, smartWalletAddress, walletClient, ownerAddress]);
 
   // Pair with a dApp using WC URI
   const pair = useCallback(

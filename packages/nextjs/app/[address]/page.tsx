@@ -2,22 +2,34 @@
 
 import { useState } from "react";
 import { useParams } from "next/navigation";
-import { Address, AddressInput, Balance, EtherInput } from "@scaffold-ui/components";
-import { formatUnits, isAddress, parseEther } from "viem";
+import { Address, AddressInput, Balance } from "@scaffold-ui/components";
+import { encodeFunctionData, formatUnits, isAddress, parseEther, parseUnits } from "viem";
 import { base } from "viem/chains";
 import { normalize } from "viem/ens";
-import { useAccount, useEnsAddress, useReadContract, useWriteContract } from "wagmi";
+import { useAccount, useBalance, useEnsAddress, useReadContract, useWriteContract } from "wagmi";
 import { WalletConnectSection } from "~~/components/scaffold-eth";
 import { SMART_WALLET_ABI } from "~~/contracts/SmartWalletAbi";
 
 // USDC on Base
 const USDC_ADDRESS_BASE = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913" as const;
+const USDC_DECIMALS = 6;
+
 const ERC20_ABI = [
   {
     inputs: [{ name: "account", type: "address" }],
     name: "balanceOf",
     outputs: [{ name: "", type: "uint256" }],
     stateMutability: "view",
+    type: "function",
+  },
+  {
+    inputs: [
+      { name: "to", type: "address" },
+      { name: "amount", type: "uint256" },
+    ],
+    name: "transfer",
+    outputs: [{ name: "", type: "bool" }],
+    stateMutability: "nonpayable",
     type: "function",
   },
 ] as const;
@@ -30,6 +42,10 @@ const WalletPage = () => {
   // Transfer ETH state
   const [recipientAddress, setRecipientAddress] = useState("");
   const [ethAmount, setEthAmount] = useState("");
+
+  // Transfer USDC state
+  const [usdcRecipientAddress, setUsdcRecipientAddress] = useState("");
+  const [usdcAmount, setUsdcAmount] = useState("");
 
   // Operator management state
   const [newOperatorAddress, setNewOperatorAddress] = useState("");
@@ -61,6 +77,14 @@ const WalletPage = () => {
   });
   const finalRemoveOperatorAddress = isRemoveOperatorEns ? resolvedRemoveOperatorAddress : removeOperatorAddress;
 
+  // Resolve ENS for USDC recipient
+  const isUsdcRecipientEns = usdcRecipientAddress.endsWith(".eth");
+  const { data: resolvedUsdcRecipientAddress } = useEnsAddress({
+    name: isUsdcRecipientEns ? normalize(usdcRecipientAddress) : undefined,
+    chainId: 1,
+  });
+  const finalUsdcRecipientAddress = isUsdcRecipientEns ? resolvedUsdcRecipientAddress : usdcRecipientAddress;
+
   // Validate address format
   const isValidAddress = walletAddress && isAddress(walletAddress);
 
@@ -82,6 +106,14 @@ const WalletPage = () => {
     args: connectedAddress ? [connectedAddress] : undefined,
     query: {
       enabled: !!isValidAddress && !!connectedAddress,
+    },
+  });
+
+  // Read ETH balance
+  const { data: ethBalance } = useBalance({
+    address: isValidAddress ? (walletAddress as `0x${string}`) : undefined,
+    query: {
+      enabled: !!isValidAddress,
     },
   });
 
@@ -178,6 +210,61 @@ const WalletPage = () => {
       setRemoveOperatorAddress("");
     } catch (error) {
       console.error("Remove operator failed:", error);
+    }
+  };
+
+  const handleTransferUSDC = async () => {
+    if (!usdcRecipientAddress || !usdcAmount) {
+      console.log("Missing recipient or amount");
+      return;
+    }
+
+    // Use resolved ENS address or direct address
+    const targetAddress = finalUsdcRecipientAddress;
+
+    if (!targetAddress || !isAddress(targetAddress)) {
+      console.log("Invalid or unresolved address:", usdcRecipientAddress, "->", targetAddress);
+      return;
+    }
+
+    try {
+      // Encode the ERC20 transfer call
+      const transferData = encodeFunctionData({
+        abi: ERC20_ABI,
+        functionName: "transfer",
+        args: [targetAddress as `0x${string}`, parseUnits(usdcAmount, USDC_DECIMALS)],
+      });
+
+      console.log("Calling exec with USDC transfer:", {
+        walletAddress,
+        target: USDC_ADDRESS_BASE,
+        value: "0",
+        data: transferData,
+      });
+
+      await writeExec({
+        address: walletAddress as `0x${string}`,
+        abi: SMART_WALLET_ABI,
+        functionName: "exec",
+        args: [USDC_ADDRESS_BASE, 0n, transferData],
+      });
+
+      setUsdcRecipientAddress("");
+      setUsdcAmount("");
+    } catch (error) {
+      console.error("USDC transfer failed:", error);
+    }
+  };
+
+  const handleMaxETH = () => {
+    if (ethBalance) {
+      setEthAmount(formatUnits(ethBalance.value, 18));
+    }
+  };
+
+  const handleMaxUSDC = () => {
+    if (usdcBalance) {
+      setUsdcAmount(formatUnits(usdcBalance, USDC_DECIMALS));
     }
   };
 
@@ -286,7 +373,7 @@ const WalletPage = () => {
 
         {/* Transfer ETH Section - Only for owners/operators */}
         {connectedAddress && hasPermissions && !isLoading && (
-          <div className="bg-base-200 rounded-3xl p-6">
+          <div className="bg-base-200 rounded-3xl p-6 mb-8">
             <h2 className="text-2xl font-semibold mb-4">Transfer ETH</h2>
             <p className="text-sm opacity-60 mb-4">Send ETH from this smart wallet to any address</p>
 
@@ -303,8 +390,19 @@ const WalletPage = () => {
 
               {/* Amount */}
               <div className="bg-base-100 rounded-xl p-4">
-                <p className="text-sm font-medium opacity-60 mb-2">Amount (ETH)</p>
-                <EtherInput placeholder="0.0" onValueChange={({ valueInEth }) => setEthAmount(valueInEth)} />
+                <div className="flex justify-between items-center mb-2">
+                  <p className="text-sm font-medium opacity-60">Amount (ETH)</p>
+                  <button onClick={handleMaxETH} className="btn btn-xs btn-ghost" disabled={!ethBalance}>
+                    [max]
+                  </button>
+                </div>
+                <input
+                  type="text"
+                  placeholder="0.0"
+                  value={ethAmount}
+                  onChange={e => setEthAmount(e.target.value)}
+                  className="input input-bordered w-full"
+                />
               </div>
 
               {/* Transfer Button */}
@@ -326,6 +424,65 @@ const WalletPage = () => {
                   </>
                 ) : (
                   "Transfer ETH"
+                )}
+              </button>
+            </div>
+          </div>
+        )}
+
+        {/* Transfer USDC Section - Only for owners/operators */}
+        {connectedAddress && hasPermissions && !isLoading && (
+          <div className="bg-base-200 rounded-3xl p-6">
+            <h2 className="text-2xl font-semibold mb-4">Transfer USDC</h2>
+            <p className="text-sm opacity-60 mb-4">Send USDC from this smart wallet to any address (Base network)</p>
+
+            <div className="space-y-4">
+              {/* Recipient Address */}
+              <div className="bg-base-100 rounded-xl p-4">
+                <p className="text-sm font-medium opacity-60 mb-2">Recipient Address</p>
+                <AddressInput
+                  value={usdcRecipientAddress}
+                  onChange={setUsdcRecipientAddress}
+                  placeholder="Enter recipient address"
+                />
+              </div>
+
+              {/* Amount */}
+              <div className="bg-base-100 rounded-xl p-4">
+                <div className="flex justify-between items-center mb-2">
+                  <p className="text-sm font-medium opacity-60">Amount (USDC)</p>
+                  <button onClick={handleMaxUSDC} className="btn btn-xs btn-ghost" disabled={!usdcBalance}>
+                    [max]
+                  </button>
+                </div>
+                <input
+                  type="text"
+                  placeholder="0.00"
+                  value={usdcAmount}
+                  onChange={e => setUsdcAmount(e.target.value)}
+                  className="input input-bordered w-full"
+                />
+              </div>
+
+              {/* Transfer Button */}
+              <button
+                className="btn btn-primary w-full"
+                onClick={handleTransferUSDC}
+                disabled={
+                  isTransferPending ||
+                  !usdcRecipientAddress ||
+                  !usdcAmount ||
+                  !finalUsdcRecipientAddress ||
+                  !isAddress(finalUsdcRecipientAddress)
+                }
+              >
+                {isTransferPending ? (
+                  <>
+                    <span className="loading loading-spinner loading-sm"></span>
+                    Transferring...
+                  </>
+                ) : (
+                  "Transfer USDC"
                 )}
               </button>
             </div>
