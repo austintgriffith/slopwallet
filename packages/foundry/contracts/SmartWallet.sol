@@ -9,6 +9,12 @@ import "@openzeppelin/contracts/access/Ownable.sol";
  * @author BuidlGuidl
  */
 contract SmartWallet is Ownable {
+    struct Call {
+        address target;
+        uint256 value;
+        bytes data;
+    }
+
     mapping(address => bool) public operators;
 
     event Executed(address indexed target, uint256 value, bytes data);
@@ -60,6 +66,25 @@ contract SmartWallet is Ownable {
         
         emit Executed(target, value, data);
         return returnData;
+    }
+
+    /**
+     * @notice Execute multiple calls atomically (for wallet_sendCalls / EIP-5792)
+     * @param calls Array of calls to execute
+     * @return results Array of return data from each call
+     */
+    function batchExec(Call[] calldata calls) 
+        external 
+        onlyOwnerOrOperator 
+        returns (bytes[] memory results) 
+    {
+        results = new bytes[](calls.length);
+        for (uint256 i = 0; i < calls.length; i++) {
+            (bool success, bytes memory returnData) = calls[i].target.call{value: calls[i].value}(calls[i].data);
+            if (!success) revert ExecutionFailed();
+            emit Executed(calls[i].target, calls[i].value, calls[i].data);
+            results[i] = returnData;
+        }
     }
 
     /**

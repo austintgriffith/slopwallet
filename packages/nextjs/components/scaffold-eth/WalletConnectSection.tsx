@@ -200,15 +200,8 @@ const SessionRequestCard = ({
     switch (method) {
       case "eth_sendTransaction":
         return "Send Transaction";
-      case "eth_signTransaction":
-        return "Sign Transaction";
-      case "personal_sign":
-        return "Sign Message";
-      case "eth_sign":
-        return "Sign Data";
-      case "eth_signTypedData":
-      case "eth_signTypedData_v4":
-        return "Sign Typed Data";
+      case "wallet_sendCalls":
+        return "Batch Calls";
       default:
         return method;
     }
@@ -223,29 +216,49 @@ const SessionRequestCard = ({
     }
   };
 
-  const isTransaction = request.method === "eth_sendTransaction" || request.method === "eth_signTransaction";
+  const isTransaction = request.method === "eth_sendTransaction";
+  const isBatchCall = request.method === "wallet_sendCalls";
 
   const handleExecute = async () => {
-    if (!isTransaction) return;
+    if (!isTransaction && !isBatchCall) return;
 
     setIsExecuting(true);
     setTxError(null);
 
     try {
-      // Convert hex value to BigInt
-      const value = request.params.value ? BigInt(request.params.value) : 0n;
-      const target = (request.params.to || "0x0000000000000000000000000000000000000000") as `0x${string}`;
-      const data = (request.params.data || "0x") as `0x${string}`;
+      let txHash: string;
 
-      console.log("Executing transaction via SmartWallet.exec:", { target, value: value.toString(), data });
+      if (isBatchCall && request.calls && request.calls.length > 0) {
+        // Handle wallet_sendCalls - use batchExec
+        const calls = request.calls.map(call => ({
+          target: (call.to || "0x0000000000000000000000000000000000000000") as `0x${string}`,
+          value: call.value ? BigInt(call.value) : 0n,
+          data: (call.data || "0x") as `0x${string}`,
+        }));
 
-      // Call the SmartWallet's exec function
-      const txHash = await writeContractAsync({
-        address: smartWalletAddress as `0x${string}`,
-        abi: SMART_WALLET_ABI,
-        functionName: "exec",
-        args: [target, value, data],
-      });
+        console.log("Executing batch calls via SmartWallet.batchExec:", calls);
+
+        txHash = await writeContractAsync({
+          address: smartWalletAddress as `0x${string}`,
+          abi: SMART_WALLET_ABI,
+          functionName: "batchExec",
+          args: [calls],
+        });
+      } else {
+        // Handle single eth_sendTransaction - use exec
+        const value = request.params.value ? BigInt(request.params.value) : 0n;
+        const target = (request.params.to || "0x0000000000000000000000000000000000000000") as `0x${string}`;
+        const data = (request.params.data || "0x") as `0x${string}`;
+
+        console.log("Executing transaction via SmartWallet.exec:", { target, value: value.toString(), data });
+
+        txHash = await writeContractAsync({
+          address: smartWalletAddress as `0x${string}`,
+          abi: SMART_WALLET_ABI,
+          functionName: "exec",
+          args: [target, value, data],
+        });
+      }
 
       console.log("Transaction sent:", txHash);
 
@@ -325,8 +338,46 @@ const SessionRequestCard = ({
         </div>
       )}
 
-      {/* For signing requests, show the raw params */}
-      {!isTransaction && (
+      {/* Batch Calls Details (wallet_sendCalls) */}
+      {isBatchCall && request.calls && (
+        <div className="space-y-3">
+          <div className="text-sm opacity-60">{request.calls.length} call(s) in batch</div>
+          {request.calls.map((call, index) => (
+            <div key={index} className="bg-base-300 rounded-lg p-3 space-y-2 text-sm">
+              <div className="font-medium opacity-70">Call {index + 1}</div>
+              {/* To Address */}
+              {call.to && (
+                <div className="flex items-center gap-2">
+                  <span className="opacity-60 min-w-[60px]">To:</span>
+                  <Address address={call.to as `0x${string}`} />
+                </div>
+              )}
+              {/* Value */}
+              <div className="flex items-center gap-2">
+                <span className="opacity-60 min-w-[60px]">Value:</span>
+                <span className="font-mono">{formatValue(call.value)}</span>
+              </div>
+              {/* Calldata */}
+              {call.data && call.data !== "0x" && (
+                <div>
+                  <div className="flex items-center gap-2 mb-1">
+                    <span className="opacity-60 min-w-[60px]">Data:</span>
+                    <span className="badge badge-ghost badge-sm">
+                      {call.data.length > 10 ? `${(call.data.length - 2) / 2} bytes` : "empty"}
+                    </span>
+                  </div>
+                  <div className="bg-base-200 rounded p-2 font-mono text-xs break-all max-h-24 overflow-y-auto">
+                    {call.data}
+                  </div>
+                </div>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+
+      {/* For unknown/unsupported methods, show the raw params */}
+      {!isTransaction && !isBatchCall && (
         <div className="bg-base-300 rounded p-2 font-mono text-xs break-all max-h-32 overflow-y-auto">
           {JSON.stringify(request.params, null, 2)}
         </div>
@@ -350,6 +401,31 @@ const SessionRequestCard = ({
         </div>
       )}
 
+      {/* BatchExec Parameters Display */}
+      {isBatchCall && request.calls && (
+        <div className="mt-4 pt-3 border-t border-base-300">
+          <p className="text-xs font-medium opacity-60 mb-2">Parameters for batchExec() function:</p>
+          <div className="bg-base-300 rounded p-3 font-mono text-xs space-y-2 max-h-48 overflow-y-auto">
+            {request.calls.map((call, index) => (
+              <div key={index} className="border-b border-base-200 pb-2 last:border-b-0 last:pb-0">
+                <div className="opacity-60 mb-1">calls[{index}]:</div>
+                <div className="pl-2 space-y-1">
+                  <div>
+                    <span className="opacity-60">target:</span> {call.to || "0x0"}
+                  </div>
+                  <div>
+                    <span className="opacity-60">value:</span> {call.value || "0x0"}
+                  </div>
+                  <div>
+                    <span className="opacity-60">data:</span> {call.data || "0x"}
+                  </div>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
       {/* Error Display */}
       {txError && (
         <div className="alert alert-error mt-3 py-2">
@@ -358,7 +434,7 @@ const SessionRequestCard = ({
       )}
 
       {/* Action Buttons */}
-      {isTransaction && (
+      {(isTransaction || isBatchCall) && (
         <div className="flex gap-2 mt-4">
           <button className="btn btn-primary flex-1" onClick={handleExecute} disabled={isExecuting}>
             {isExecuting ? (
@@ -366,6 +442,8 @@ const SessionRequestCard = ({
                 <span className="loading loading-spinner loading-sm"></span>
                 Executing...
               </>
+            ) : isBatchCall ? (
+              `Execute ${request.calls?.length || 0} Calls`
             ) : (
               "Execute Transaction"
             )}

@@ -19,32 +19,31 @@ const SUPPORTED_CHAIN_IDS = [
   31337, // Foundry/Local
 ];
 
-// Supported methods
-const SUPPORTED_METHODS = [
-  "eth_sendTransaction",
-  "eth_signTransaction",
-  "eth_sign",
-  "personal_sign",
-  "eth_signTypedData",
-  "eth_signTypedData_v4",
-];
+// Supported methods - Smart contract wallets can only execute transactions, not sign
+// (no private key = no ECDSA signatures for personal_sign, eth_sign, eth_signTypedData, etc.)
+// wallet_getCapabilities is required for dApps to discover we support wallet_sendCalls (EIP-5792)
+const SUPPORTED_METHODS = ["eth_sendTransaction", "wallet_sendCalls", "wallet_getCapabilities"];
 
 // Supported events
 const SUPPORTED_EVENTS = ["accountsChanged", "chainChanged"];
+
+export interface CallParams {
+  from?: string;
+  to?: string;
+  value?: string;
+  data?: string;
+  gas?: string;
+  gasPrice?: string;
+}
 
 export interface SessionRequest {
   id: number;
   topic: string;
   method: string;
   chainId: string;
-  params: {
-    from?: string;
-    to?: string;
-    value?: string;
-    data?: string;
-    gas?: string;
-    gasPrice?: string;
-  };
+  params: CallParams;
+  // For wallet_sendCalls (EIP-5792) - array of calls
+  calls?: CallParams[];
   timestamp: number;
   peerMeta?: {
     name: string;
@@ -149,25 +148,57 @@ export const useWalletConnect = ({ smartWalletAddress, enabled = true }: UseWall
 
       const { id, params } = proposal;
 
+      // Debug: Log what the dApp is requesting
+      console.log("=== WalletConnect Session Debug ===");
+      console.log("dApp requested namespaces:", JSON.stringify(params.requiredNamespaces, null, 2));
+      console.log("dApp optional namespaces:", JSON.stringify(params.optionalNamespaces, null, 2));
+      console.log("Our SUPPORTED_METHODS:", SUPPORTED_METHODS);
+
       try {
+        const ourSupportedNamespaces = {
+          eip155: {
+            chains: SUPPORTED_CHAIN_IDS.map(chainId => `eip155:${chainId}`),
+            methods: SUPPORTED_METHODS,
+            events: SUPPORTED_EVENTS,
+            accounts: SUPPORTED_CHAIN_IDS.map(chainId => `eip155:${chainId}:${smartWalletAddress}`),
+          },
+        };
+        console.log("Our supported namespaces:", JSON.stringify(ourSupportedNamespaces, null, 2));
+
         const approvedNamespaces = buildApprovedNamespaces({
           proposal: params,
-          supportedNamespaces: {
-            eip155: {
-              chains: SUPPORTED_CHAIN_IDS.map(chainId => `eip155:${chainId}`),
-              methods: SUPPORTED_METHODS,
-              events: SUPPORTED_EVENTS,
-              accounts: SUPPORTED_CHAIN_IDS.map(chainId => `eip155:${chainId}:${smartWalletAddress}`),
-            },
-          },
+          supportedNamespaces: ourSupportedNamespaces,
         });
+
+        // Debug: Log what actually gets approved
+        console.log("=== APPROVED NAMESPACES (sent to dApp) ===");
+        console.log(JSON.stringify(approvedNamespaces, null, 2));
+        console.log("Approved methods:", approvedNamespaces.eip155?.methods);
+        console.log("wallet_sendCalls included?", approvedNamespaces.eip155?.methods?.includes("wallet_sendCalls"));
+        console.log(
+          "wallet_getCapabilities included?",
+          approvedNamespaces.eip155?.methods?.includes("wallet_getCapabilities"),
+        );
+
+        // Check if dApp requested these methods
+        const dAppRequestedMethods = [
+          ...(params.requiredNamespaces?.eip155?.methods || []),
+          ...(params.optionalNamespaces?.eip155?.methods || []),
+        ];
+        console.log("=== dApp REQUESTED these methods ===");
+        console.log("wallet_sendCalls requested?", dAppRequestedMethods.includes("wallet_sendCalls"));
+        console.log("wallet_getCapabilities requested?", dAppRequestedMethods.includes("wallet_getCapabilities"));
+        console.log("All requested methods:", dAppRequestedMethods);
 
         const session = await walletKit.approveSession({
           id,
           namespaces: approvedNamespaces,
         });
 
-        console.log("Session approved:", session);
+        console.log("✅ Session approved successfully!");
+        console.log("Session topic:", session.topic);
+        console.log("Session namespaces:", JSON.stringify(session.namespaces, null, 2));
+        console.log("=== SESSION READY - dApp should now call wallet_getCapabilities ===");
 
         // Update active sessions
         setActiveSessions(prev => [
@@ -203,17 +234,106 @@ export const useWalletConnect = ({ smartWalletAddress, enabled = true }: UseWall
       const { id, topic, params } = event;
       const { request, chainId } = params;
 
+      // Debug: Log what method the dApp is calling
+      console.log("=== Incoming Request Debug ===");
+      console.log("Method:", request.method);
+      console.log("Chain:", chainId);
+      console.log("Raw params:", JSON.stringify(request.params, null, 2));
+      console.log("Full request object:", JSON.stringify(request, null, 2));
+
+      // Handle wallet_getCapabilities - auto-respond with our capabilities (EIP-5792)
+      if (request.method === "wallet_getCapabilities") {
+        console.log("=== Responding to wallet_getCapabilities ===");
+        console.log("Requested for address:", request.params?.[0] || "no address specified");
+
+        // Build capabilities for all supported chains
+        // Format based on Base/Coinbase docs: atomic.supported = "supported" (string, not boolean!)
+        // See: https://docs.base.org/base-account/reference/provider/methods/wallet_getCapabilities
+        const capabilities: Record<string, Record<string, { supported: string | boolean }>> = {};
+        for (const supportedChainId of SUPPORTED_CHAIN_IDS) {
+          const hexChainId = `0x${supportedChainId.toString(16)}`;
+          capabilities[hexChainId] = {
+            // "atomic" is the capability name used by Base/Coinbase/Uniswap
+            // value should be string "supported" according to their docs
+            atomic: { supported: "supported" },
+            // Also include atomicBatch for EIP-5792 standard compliance
+            atomicBatch: { supported: true },
+          };
+        }
+
+        console.log("=== CAPABILITIES RESPONSE ===");
+        console.log("Capabilities object:", capabilities);
+        console.log("JSON stringified:", JSON.stringify(capabilities, null, 2));
+        console.log("NOTE: Using 'atomic' with string 'supported' per Base/Coinbase docs");
+
+        // Respond directly without user interaction
+        const response = { id, result: capabilities, jsonrpc: "2.0" as const };
+        console.log("Full WalletConnect response:", JSON.stringify(response, null, 2));
+
+        try {
+          await walletKit.respondSessionRequest({ topic, response });
+          console.log("✅ wallet_getCapabilities response sent successfully!");
+        } catch (err) {
+          console.error("❌ Failed to send wallet_getCapabilities response:", err);
+        }
+        return;
+      }
+
+      // Log if we receive wallet_sendCalls
+      if (request.method === "wallet_sendCalls") {
+        console.log("🎉🎉🎉 RECEIVED wallet_sendCalls! 🎉🎉🎉");
+        console.log("This means batching is working!");
+      }
+
+      // Log any other wallet_* methods we might not be handling
+      if (
+        request.method.startsWith("wallet_") &&
+        !["wallet_sendCalls", "wallet_getCapabilities"].includes(request.method)
+      ) {
+        console.log("⚠️ Received unhandled wallet method:", request.method);
+        console.log("We may need to implement this for full EIP-5792 support");
+      }
+
       // Get peer metadata
       const sessions = walletKit.getActiveSessions();
       const session = sessions[topic];
       const peerMeta = session?.peer?.metadata;
 
-      // Parse request params
+      // Parse request params based on method
       let requestParams = request.params;
       if (Array.isArray(requestParams)) {
         requestParams = requestParams[0] || {};
       }
 
+      // Handle wallet_sendCalls (EIP-5792) differently
+      if (request.method === "wallet_sendCalls") {
+        // wallet_sendCalls format: { version, chainId, from, calls: [{ to, value, data }, ...] }
+        const calls: CallParams[] = (requestParams?.calls || []).map(
+          (call: { to?: string; value?: string; data?: string }) => ({
+            to: call.to,
+            value: call.value,
+            data: call.data,
+          }),
+        );
+
+        const sessionRequest: SessionRequest = {
+          id,
+          topic,
+          method: request.method,
+          chainId: requestParams?.chainId || chainId,
+          params: {
+            from: requestParams?.from,
+          },
+          calls,
+          timestamp: Date.now(),
+          peerMeta,
+        };
+
+        setSessionRequests(prev => [...prev, sessionRequest]);
+        return;
+      }
+
+      // Standard eth_sendTransaction handling
       const sessionRequest: SessionRequest = {
         id,
         topic,

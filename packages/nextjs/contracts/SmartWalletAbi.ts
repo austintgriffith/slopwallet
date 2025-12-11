@@ -26,6 +26,23 @@ export const SMART_WALLET_ABI = [
   },
   {
     type: "function",
+    name: "batchExec",
+    inputs: [
+      {
+        name: "calls",
+        type: "tuple[]",
+        components: [
+          { name: "target", type: "address" },
+          { name: "value", type: "uint256" },
+          { name: "data", type: "bytes" },
+        ],
+      },
+    ],
+    outputs: [{ name: "results", type: "bytes[]" }],
+    stateMutability: "nonpayable",
+  },
+  {
+    type: "function",
     name: "operators",
     inputs: [{ name: "", type: "address" }],
     outputs: [{ name: "", type: "bool" }],
