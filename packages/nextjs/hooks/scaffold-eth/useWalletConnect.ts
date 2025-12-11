@@ -19,10 +19,21 @@ const SUPPORTED_CHAIN_IDS = [
   31337, // Foundry/Local
 ];
 
-// Supported methods - Smart contract wallets can only execute transactions, not sign
-// (no private key = no ECDSA signatures for personal_sign, eth_sign, eth_signTypedData, etc.)
+// Supported methods for WalletConnect
 // wallet_getCapabilities is required for dApps to discover we support wallet_sendCalls (EIP-5792)
-const SUPPORTED_METHODS = ["eth_sendTransaction", "wallet_sendCalls", "wallet_getCapabilities"];
+const SUPPORTED_METHODS = [
+  "eth_sendTransaction",
+  "wallet_sendCalls",
+  "wallet_getCapabilities",
+  // Compatibility - return wallet address
+  "eth_accounts",
+  "eth_requestAccounts",
+  // Signing methods - advertise so WC allows requests through
+  // (we'll respond with error since SCW can't sign without private key)
+  "eth_sign",
+  "eth_signTypedData",
+  "eth_signTypedData_v4",
+];
 
 // Supported events
 const SUPPORTED_EVENTS = ["accountsChanged", "chainChanged"];
@@ -251,6 +262,7 @@ export const useWalletConnect = ({ smartWalletAddress, enabled = true }: UseWall
         // See: https://docs.base.org/base-account/reference/provider/methods/wallet_getCapabilities
         const capabilities: Record<string, Record<string, { supported: string | boolean }>> = {};
         for (const supportedChainId of SUPPORTED_CHAIN_IDS) {
+          // Hex chain ID format required by EIP-5792: "0x2105" for Base, etc.
           const hexChainId = `0x${supportedChainId.toString(16)}`;
           capabilities[hexChainId] = {
             // "atomic" is the capability name used by Base/Coinbase/Uniswap
@@ -275,6 +287,48 @@ export const useWalletConnect = ({ smartWalletAddress, enabled = true }: UseWall
           console.log("✅ wallet_getCapabilities response sent successfully!");
         } catch (err) {
           console.error("❌ Failed to send wallet_getCapabilities response:", err);
+        }
+        return;
+      }
+
+      // Handle eth_accounts and eth_requestAccounts - return the smart wallet address
+      if (request.method === "eth_accounts" || request.method === "eth_requestAccounts") {
+        console.log(`=== Responding to ${request.method} ===`);
+        const accounts = [smartWalletAddress];
+        console.log("Returning accounts:", accounts);
+
+        try {
+          await walletKit.respondSessionRequest({
+            topic,
+            response: { id, result: accounts, jsonrpc: "2.0" as const },
+          });
+          console.log(`✅ ${request.method} response sent successfully!`);
+        } catch (err) {
+          console.error(`❌ Failed to send ${request.method} response:`, err);
+        }
+        return;
+      }
+
+      // Handle signing methods - respond with error (SCW can't sign without private key)
+      if (["eth_sign", "eth_signTypedData", "eth_signTypedData_v4"].includes(request.method)) {
+        console.log(`=== Received signing request: ${request.method} ===`);
+        console.log("Smart contract wallets cannot sign - responding with error");
+
+        try {
+          await walletKit.respondSessionRequest({
+            topic,
+            response: {
+              id,
+              jsonrpc: "2.0" as const,
+              error: {
+                code: 4200,
+                message: "Smart contract wallets cannot sign messages. Use on-chain verification instead.",
+              },
+            },
+          });
+          console.log(`✅ ${request.method} error response sent`);
+        } catch (err) {
+          console.error(`❌ Failed to send ${request.method} error response:`, err);
         }
         return;
       }
