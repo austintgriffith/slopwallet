@@ -31,12 +31,11 @@ const SUPPORTED_METHODS = [
   // Compatibility - return wallet address
   "eth_accounts",
   "eth_requestAccounts",
-  // Signing methods - now supported via ERC-1271
-  // Owner's EOA signs off-chain, signature can be verified on-chain via isValidSignature
-  "personal_sign",
-  "eth_sign",
-  "eth_signTypedData",
-  "eth_signTypedData_v4",
+  // Signing methods - DISABLED FOR TESTING
+  // "personal_sign",
+  // "eth_sign",
+  // "eth_signTypedData",
+  // "eth_signTypedData_v4",
 ];
 
 // Supported events
