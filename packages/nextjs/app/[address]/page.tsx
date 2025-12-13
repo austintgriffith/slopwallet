@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useParams } from "next/navigation";
 import { ImpersonatorIframe, ImpersonatorIframeProvider } from "@impersonator/iframe";
 import { Address, AddressInput, Balance } from "@scaffold-ui/components";
@@ -8,10 +8,24 @@ import { useDebounceValue } from "usehooks-ts";
 import { encodeFunctionData, formatEther, formatUnits, isAddress, isHex, parseEther, parseUnits } from "viem";
 import { base } from "viem/chains";
 import { normalize } from "viem/ens";
-import { useAccount, useBalance, useEnsAddress, useReadContract, useWriteContract } from "wagmi";
+import { useAccount, useBalance, useChainId, useConfig, useEnsAddress, useReadContract, useWriteContract } from "wagmi";
+import { readContract } from "wagmi/actions";
 import { WalletConnectSection } from "~~/components/scaffold-eth";
 import { SMART_WALLET_ABI } from "~~/contracts/SmartWalletAbi";
 import scaffoldConfig from "~~/scaffold.config";
+import {
+  StoredPasskey,
+  WebAuthnAuth,
+  buildChallengeHash,
+  clearPasskeyFromStorage,
+  createPasskey,
+  getCredentialIdHash,
+  getPasskeyFromStorage,
+  isWebAuthnSupported,
+  loginWithPasskey,
+  savePasskeyToStorage,
+  signWithPasskey,
+} from "~~/utils/passkey";
 
 // USDC on Base
 const USDC_ADDRESS_BASE = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913" as const;
@@ -119,6 +133,10 @@ const WalletPage = () => {
   const [newOperatorAddress, setNewOperatorAddress] = useState("");
   const [removeOperatorAddress, setRemoveOperatorAddress] = useState("");
 
+  // Check operator state
+  const [checkOperatorAddress, setCheckOperatorAddress] = useState("");
+  const [operatorCheckTriggered, setOperatorCheckTriggered] = useState(false);
+
   // Raw TX state
   const [rawTxJson, setRawTxJson] = useState("");
   const [parsedTx, setParsedTx] = useState<{
@@ -130,6 +148,29 @@ const WalletPage = () => {
   // Impersonator state
   const [appUrl, setAppUrl] = useState("");
   const [debouncedAppUrl] = useDebounceValue(appUrl, 500);
+
+  // Passkey state
+  const [currentPasskey, setCurrentPasskey] = useState<StoredPasskey | null>(null);
+  const [isGeneratingPasskey, setIsGeneratingPasskey] = useState(false);
+  const [isLoggingIn, setIsLoggingIn] = useState(false);
+  const [isAddingPasskeyOperator, setIsAddingPasskeyOperator] = useState(false);
+  const [passkeyError, setPasskeyError] = useState<string | null>(null);
+  const [isMounted, setIsMounted] = useState(false); // Track client-side mount for hydration
+
+  // Passkey Send ETH state
+  const [passkeyRecipient, setPasskeyRecipient] = useState("");
+  const [passkeyAmount, setPasskeyAmount] = useState("");
+  const [isSigningWithPasskey, setIsSigningWithPasskey] = useState(false);
+  const [isRelaying, setIsRelaying] = useState(false);
+  const [signedMetaTx, setSignedMetaTx] = useState<{
+    target: `0x${string}`;
+    value: bigint;
+    data: `0x${string}`;
+    qx: `0x${string}`;
+    qy: `0x${string}`;
+    deadline: bigint;
+    auth: WebAuthnAuth;
+  } | null>(null);
 
   // Resolve ENS name if needed
   const isEnsName = recipientAddress.endsWith(".eth");
@@ -173,6 +214,22 @@ const WalletPage = () => {
   });
   const finalZoraRecipientAddress = isZoraRecipientEns ? resolvedZoraRecipientAddress : zoraRecipientAddress;
 
+  // Resolve ENS for passkey recipient
+  const isPasskeyRecipientEns = passkeyRecipient.endsWith(".eth");
+  const { data: resolvedPasskeyRecipient } = useEnsAddress({
+    name: isPasskeyRecipientEns ? normalize(passkeyRecipient) : undefined,
+    chainId: 1,
+  });
+  const finalPasskeyRecipient = isPasskeyRecipientEns ? resolvedPasskeyRecipient : passkeyRecipient;
+
+  // Resolve ENS for check operator
+  const isCheckOperatorEns = checkOperatorAddress.endsWith(".eth");
+  const { data: resolvedCheckOperatorAddress } = useEnsAddress({
+    name: isCheckOperatorEns ? normalize(checkOperatorAddress) : undefined,
+    chainId: 1,
+  });
+  const finalCheckOperatorAddress = isCheckOperatorEns ? resolvedCheckOperatorAddress : checkOperatorAddress;
+
   // Validate address format
   const isValidAddress = walletAddress && isAddress(walletAddress);
 
@@ -194,6 +251,24 @@ const WalletPage = () => {
     args: connectedAddress ? [connectedAddress] : undefined,
     query: {
       enabled: !!isValidAddress && !!connectedAddress,
+    },
+  });
+
+  // Check if a specific address is an operator (user-triggered)
+  const { data: checkedAddressIsOperator, isLoading: checkingOperator } = useReadContract({
+    address: isValidAddress ? (walletAddress as `0x${string}`) : undefined,
+    abi: SMART_WALLET_ABI,
+    functionName: "operators",
+    args:
+      finalCheckOperatorAddress && isAddress(finalCheckOperatorAddress)
+        ? [finalCheckOperatorAddress as `0x${string}`]
+        : undefined,
+    query: {
+      enabled:
+        !!isValidAddress &&
+        !!finalCheckOperatorAddress &&
+        isAddress(finalCheckOperatorAddress) &&
+        operatorCheckTriggered,
     },
   });
 
@@ -228,6 +303,59 @@ const WalletPage = () => {
       enabled: !!isValidAddress,
     },
   });
+
+  // Get current chain ID for meta transaction signing
+  const chainId = useChainId();
+
+  // Get wagmi config for contract reads in callbacks
+  const config = useConfig();
+
+  // Check if current passkey is an operator
+  const { data: isPasskeyOperator, refetch: refetchPasskeyOperator } = useReadContract({
+    address: isValidAddress ? (walletAddress as `0x${string}`) : undefined,
+    abi: SMART_WALLET_ABI,
+    functionName: "operators",
+    args: currentPasskey ? [currentPasskey.passkeyAddress] : undefined,
+    query: {
+      enabled: !!isValidAddress && !!currentPasskey,
+    },
+  });
+
+  // Get nonce for passkey meta transactions
+  const { data: passkeyNonce, refetch: refetchPasskeyNonce } = useReadContract({
+    address: isValidAddress ? (walletAddress as `0x${string}`) : undefined,
+    abi: SMART_WALLET_ABI,
+    functionName: "nonces",
+    args: currentPasskey ? [currentPasskey.passkeyAddress] : undefined,
+    query: {
+      enabled: !!isValidAddress && !!currentPasskey,
+    },
+  });
+
+  // Check if any passkey has been created (controls adaptive CTA)
+  const { data: passkeyCreatedOnChain, refetch: refetchPasskeyCreated } = useReadContract({
+    address: isValidAddress ? (walletAddress as `0x${string}`) : undefined,
+    abi: SMART_WALLET_ABI,
+    functionName: "passkeyCreated",
+    query: {
+      enabled: !!isValidAddress,
+    },
+  });
+
+  // Track client-side mount for hydration safety
+  useEffect(() => {
+    setIsMounted(true);
+  }, []);
+
+  // Load passkey from localStorage on mount
+  useEffect(() => {
+    if (isValidAddress && typeof window !== "undefined") {
+      const stored = getPasskeyFromStorage(walletAddress);
+      if (stored) {
+        setCurrentPasskey(stored);
+      }
+    }
+  }, [walletAddress, isValidAddress]);
 
   // Determine role
   const isOwner = connectedAddress && owner && connectedAddress.toLowerCase() === owner.toLowerCase();
@@ -416,6 +544,241 @@ const WalletPage = () => {
     if (zoraBalance) {
       setZoraAmount(formatUnits(zoraBalance, ZORA_DECIMALS));
     }
+  };
+
+  // Passkey handlers
+
+  // Generate a NEW passkey and add it as operator in one flow
+  const handleGeneratePasskey = async () => {
+    if (!isWebAuthnSupported()) {
+      setPasskeyError("WebAuthn is not supported in this browser");
+      return;
+    }
+
+    setIsGeneratingPasskey(true);
+    setPasskeyError(null);
+
+    try {
+      // Create a new passkey - this returns qx, qy, credentialId
+      const result = await createPasskey();
+      const stored: StoredPasskey = {
+        credentialId: result.credentialId,
+        qx: result.qx,
+        qy: result.qy,
+        passkeyAddress: result.passkeyAddress,
+      };
+
+      // Save to localStorage for convenience
+      savePasskeyToStorage(walletAddress, stored);
+      setCurrentPasskey(stored);
+    } catch (error) {
+      console.error("Failed to generate passkey:", error);
+      setPasskeyError(error instanceof Error ? error.message : "Failed to generate passkey");
+    } finally {
+      setIsGeneratingPasskey(false);
+    }
+  };
+
+  // Login with existing passkey - recovers qx/qy from signature
+  // Optimized: if passkey is already registered on-chain, only needs 1 Touch ID
+  const handleLoginWithPasskey = async () => {
+    if (!isWebAuthnSupported()) {
+      setPasskeyError("WebAuthn is not supported in this browser");
+      return;
+    }
+
+    setIsLoggingIn(true);
+    setPasskeyError(null);
+
+    try {
+      // Callback to check if a candidate passkey address is an operator
+      // This enables single-signature login for registered passkeys
+      const checkIsOperator = async (passkeyAddress: `0x${string}`): Promise<boolean> => {
+        const result = await readContract(config, {
+          address: walletAddress as `0x${string}`,
+          abi: SMART_WALLET_ABI,
+          functionName: "operators",
+          args: [passkeyAddress],
+        });
+        return result as boolean;
+      };
+
+      // Call get() and recover public key from signature
+      // If passkey is registered, only needs 1 Touch ID; otherwise needs 2
+      const { credentialId, qx, qy, passkeyAddress } = await loginWithPasskey(checkIsOperator);
+
+      // Build the stored passkey object with recovered public key
+      const stored: StoredPasskey = {
+        credentialId,
+        qx,
+        qy,
+        passkeyAddress,
+      };
+
+      // Save to localStorage for convenience
+      savePasskeyToStorage(walletAddress, stored);
+      setCurrentPasskey(stored);
+
+      // Refetch operator status for this passkey
+      await refetchPasskeyOperator();
+    } catch (error) {
+      console.error("Failed to login with passkey:", error);
+      setPasskeyError(error instanceof Error ? error.message : "Failed to login with passkey");
+    } finally {
+      setIsLoggingIn(false);
+    }
+  };
+
+  // Add passkey as operator - includes credentialIdHash for on-chain lookup
+  const handleAddPasskeyOperator = async () => {
+    if (!currentPasskey) {
+      setPasskeyError("No passkey available to add as operator");
+      return;
+    }
+
+    setIsAddingPasskeyOperator(true);
+    setPasskeyError(null);
+
+    try {
+      // Compute the credentialIdHash for on-chain storage
+      const credentialIdHash = getCredentialIdHash(currentPasskey.credentialId);
+
+      await writeAddOperator({
+        address: walletAddress as `0x${string}`,
+        abi: SMART_WALLET_ABI,
+        functionName: "addPasskeyOperator",
+        args: [currentPasskey.qx, currentPasskey.qy, credentialIdHash],
+      });
+
+      // Refetch operator status and passkeyCreated flag after adding
+      await Promise.all([refetchPasskeyOperator(), refetchPasskeyCreated()]);
+    } catch (error) {
+      console.error("Failed to add passkey operator:", error);
+      setPasskeyError(error instanceof Error ? error.message : "Failed to add passkey operator");
+    } finally {
+      setIsAddingPasskeyOperator(false);
+    }
+  };
+
+  const handleClearPasskey = () => {
+    clearPasskeyFromStorage(walletAddress);
+    setCurrentPasskey(null);
+    setPasskeyError(null);
+  };
+
+  // Sign ETH transfer with passkey
+  const handleSignWithPasskey = async () => {
+    if (!currentPasskey || !finalPasskeyRecipient || !passkeyAmount) {
+      setPasskeyError("Missing passkey, recipient, or amount");
+      return;
+    }
+
+    if (!isAddress(finalPasskeyRecipient)) {
+      setPasskeyError("Invalid recipient address");
+      return;
+    }
+
+    if (passkeyNonce === undefined) {
+      setPasskeyError("Could not fetch nonce");
+      return;
+    }
+
+    setIsSigningWithPasskey(true);
+    setPasskeyError(null);
+    setSignedMetaTx(null);
+
+    try {
+      const target = finalPasskeyRecipient as `0x${string}`;
+      const value = parseEther(passkeyAmount);
+      const data = "0x" as `0x${string}`; // Empty data for ETH transfer
+      const deadline = BigInt(Math.floor(Date.now() / 1000) + 3600); // 1 hour from now
+
+      // Build the challenge hash
+      const challengeHash = buildChallengeHash(
+        BigInt(chainId),
+        walletAddress as `0x${string}`,
+        target,
+        value,
+        data,
+        passkeyNonce,
+        deadline,
+      );
+
+      // Convert hash to Uint8Array for WebAuthn
+      const challengeBytes = new Uint8Array(
+        (challengeHash.slice(2).match(/.{2}/g) || []).map(byte => parseInt(byte, 16)),
+      );
+
+      // Sign with passkey
+      const { auth } = await signWithPasskey(currentPasskey.credentialId, challengeBytes);
+
+      setSignedMetaTx({
+        target,
+        value,
+        data,
+        qx: currentPasskey.qx,
+        qy: currentPasskey.qy,
+        deadline,
+        auth,
+      });
+    } catch (error) {
+      console.error("Failed to sign with passkey:", error);
+      setPasskeyError(error instanceof Error ? error.message : "Failed to sign with passkey");
+    } finally {
+      setIsSigningWithPasskey(false);
+    }
+  };
+
+  // Relay the signed meta transaction
+  const handleRelayTransaction = async () => {
+    if (!signedMetaTx) {
+      setPasskeyError("No signed transaction to relay");
+      return;
+    }
+
+    setIsRelaying(true);
+    setPasskeyError(null);
+
+    try {
+      await writeExec({
+        address: walletAddress as `0x${string}`,
+        abi: SMART_WALLET_ABI,
+        functionName: "metaExecPasskey",
+        args: [
+          signedMetaTx.target,
+          signedMetaTx.value,
+          signedMetaTx.data,
+          signedMetaTx.qx,
+          signedMetaTx.qy,
+          signedMetaTx.deadline,
+          {
+            r: signedMetaTx.auth.r,
+            s: signedMetaTx.auth.s,
+            challengeIndex: signedMetaTx.auth.challengeIndex,
+            typeIndex: signedMetaTx.auth.typeIndex,
+            authenticatorData: signedMetaTx.auth.authenticatorData,
+            clientDataJSON: signedMetaTx.auth.clientDataJSON,
+          },
+        ],
+      });
+
+      // Clear the form and signed tx on success
+      setPasskeyRecipient("");
+      setPasskeyAmount("");
+      setSignedMetaTx(null);
+      // Refetch nonce for next transaction
+      await refetchPasskeyNonce();
+    } catch (error) {
+      console.error("Failed to relay transaction:", error);
+      setPasskeyError(error instanceof Error ? error.message : "Failed to relay transaction");
+    } finally {
+      setIsRelaying(false);
+    }
+  };
+
+  // Clear signed meta transaction
+  const handleClearSignedTx = () => {
+    setSignedMetaTx(null);
   };
 
   const handleSwapUSDCtoETH = async () => {
@@ -616,7 +979,9 @@ const WalletPage = () => {
   return (
     <div className="flex flex-col items-center pt-10 px-4">
       <div className="max-w-2xl w-full">
-        <h1 className="text-4xl font-bold text-center mb-2">Smart Wallet</h1>
+        <h1 className="text-4xl font-bold text-center mb-2">
+          Smart Wallet {passkeyCreatedOnChain ? "(w/ operator)" : "(needs operator)"}
+        </h1>
         <p className="text-center text-lg opacity-70 mb-8">View wallet details and permissions</p>
 
         {/* Wallet Info Card */}
@@ -722,6 +1087,389 @@ const WalletPage = () => {
         ) : (
           <div className="bg-base-200 rounded-3xl p-6 text-center mb-8">
             <p className="opacity-70">Connect your wallet to see your permissions</p>
+          </div>
+        )}
+
+        {/* Check Operator Status Section */}
+        <div className="bg-base-200 rounded-3xl p-6 mb-8">
+          <h2 className="text-2xl font-semibold mb-4">Check Operator Status</h2>
+          <p className="text-sm opacity-60 mb-4">Check if an address is an operator for this wallet</p>
+
+          <div className="space-y-4">
+            <div className="bg-base-100 rounded-xl p-4">
+              <p className="text-sm font-medium opacity-60 mb-2">Address to Check</p>
+              <AddressInput
+                value={checkOperatorAddress}
+                onChange={value => {
+                  setCheckOperatorAddress(value);
+                  setOperatorCheckTriggered(false);
+                }}
+                placeholder="Enter address or ENS"
+              />
+            </div>
+
+            <button
+              className="btn btn-secondary w-full"
+              onClick={() => setOperatorCheckTriggered(true)}
+              disabled={
+                !checkOperatorAddress ||
+                !finalCheckOperatorAddress ||
+                !isAddress(finalCheckOperatorAddress) ||
+                checkingOperator
+              }
+            >
+              {checkingOperator ? (
+                <>
+                  <span className="loading loading-spinner loading-sm"></span>
+                  Checking...
+                </>
+              ) : (
+                "Check Operator"
+              )}
+            </button>
+
+            {/* Result Display */}
+            {operatorCheckTriggered &&
+              finalCheckOperatorAddress &&
+              isAddress(finalCheckOperatorAddress) &&
+              !checkingOperator && (
+                <div
+                  className={`rounded-xl p-4 ${checkedAddressIsOperator ? "bg-success/10 border border-success" : "bg-error/10 border border-error"}`}
+                >
+                  <div className="flex items-center gap-2">
+                    <Address address={finalCheckOperatorAddress as `0x${string}`} />
+                    <span className={`badge ${checkedAddressIsOperator ? "badge-success" : "badge-error"}`}>
+                      {checkedAddressIsOperator ? "Is Operator" : "Not Operator"}
+                    </span>
+                  </div>
+                </div>
+              )}
+          </div>
+        </div>
+
+        {/* Passkey Authentication Section */}
+        <div className="bg-base-200 rounded-3xl p-6 mb-8">
+          <h2 className="text-2xl font-semibold mb-4">Passkey Authentication</h2>
+          <p className="text-sm opacity-60 mb-4">
+            Use a passkey (Touch ID, Face ID, Windows Hello) to sign transactions without needing gas
+          </p>
+
+          {/* Error Display */}
+          {passkeyError && (
+            <div className="bg-error/10 border border-error rounded-xl p-4 mb-4">
+              <p className="text-error text-sm">{passkeyError}</p>
+              <button className="btn btn-xs btn-ghost mt-2" onClick={() => setPasskeyError(null)}>
+                Dismiss
+              </button>
+            </div>
+          )}
+
+          {/* Current Passkey Status */}
+          {currentPasskey ? (
+            <div className="space-y-4">
+              {/* Passkey Info */}
+              <div className="bg-base-100 rounded-xl p-4">
+                <div className="flex items-center justify-between mb-2">
+                  <p className="text-sm font-medium opacity-60">Passkey Status</p>
+                  {isPasskeyOperator ? (
+                    <span className="badge badge-success">Active Operator</span>
+                  ) : (
+                    <span className="badge badge-warning">Not Registered</span>
+                  )}
+                </div>
+                <div className="space-y-2">
+                  <div>
+                    <p className="text-xs opacity-60">Passkey Address</p>
+                    <Address address={currentPasskey.passkeyAddress} />
+                  </div>
+                  <div>
+                    <p className="text-xs opacity-60">Credential ID</p>
+                    <p className="font-mono text-xs truncate">{currentPasskey.credentialId}</p>
+                  </div>
+                </div>
+              </div>
+
+              {/* Actions based on status */}
+              <div className="space-y-2">
+                {/* Add as Operator button - only for owner, only if not already operator */}
+                {isOwner && !isPasskeyOperator && (
+                  <button
+                    className="btn btn-primary w-full"
+                    onClick={handleAddPasskeyOperator}
+                    disabled={isAddingPasskeyOperator}
+                  >
+                    {isAddingPasskeyOperator ? (
+                      <>
+                        <span className="loading loading-spinner loading-sm"></span>
+                        Adding as Operator...
+                      </>
+                    ) : (
+                      "Add Passkey as Operator"
+                    )}
+                  </button>
+                )}
+
+                {/* If passkey is operator, show ready message */}
+                {isPasskeyOperator && (
+                  <div className="bg-success/10 border border-success rounded-xl p-4 text-center">
+                    <p className="text-success font-medium">Passkey is ready to sign transactions</p>
+                    <p className="text-xs opacity-70 mt-1">Use the &quot;Send ETH with Passkey&quot; section below</p>
+                  </div>
+                )}
+
+                {/* Clear passkey button */}
+                <button className="btn btn-ghost btn-sm w-full" onClick={handleClearPasskey}>
+                  Clear Passkey
+                </button>
+              </div>
+            </div>
+          ) : (
+            /* No passkey connected - show adaptive CTAs based on passkeyCreatedOnChain */
+            <div className="space-y-4">
+              {/* Wait for client mount to check WebAuthn support */}
+              {!isMounted ? (
+                <div className="flex justify-center p-4">
+                  <span className="loading loading-spinner loading-md"></span>
+                </div>
+              ) : !isWebAuthnSupported() ? (
+                <div className="bg-warning/10 border border-warning rounded-xl p-4 text-center">
+                  <p className="text-warning font-medium">WebAuthn not supported</p>
+                  <p className="text-xs opacity-70 mt-1">
+                    Your browser doesn&apos;t support passkeys. Try Chrome, Safari, or Edge.
+                  </p>
+                </div>
+              ) : passkeyCreatedOnChain ? (
+                /* Passkey exists on-chain - show Login as PRIMARY */
+                <>
+                  <button
+                    className="btn btn-primary w-full btn-lg"
+                    onClick={handleLoginWithPasskey}
+                    disabled={isLoggingIn || isGeneratingPasskey}
+                  >
+                    {isLoggingIn ? (
+                      <>
+                        <span className="loading loading-spinner loading-sm"></span>
+                        Logging in...
+                      </>
+                    ) : (
+                      "Login with Passkey"
+                    )}
+                  </button>
+                  <p className="text-xs text-center opacity-60">Use your existing registered passkey</p>
+
+                  {/* Secondary: Add New Passkey */}
+                  <div className="divider text-xs opacity-60">OR</div>
+                  <button
+                    className="btn btn-ghost btn-sm w-full"
+                    onClick={handleGeneratePasskey}
+                    disabled={isGeneratingPasskey || isLoggingIn}
+                  >
+                    {isGeneratingPasskey ? (
+                      <>
+                        <span className="loading loading-spinner loading-sm"></span>
+                        Generating...
+                      </>
+                    ) : (
+                      "Add New Passkey"
+                    )}
+                  </button>
+                  <p className="text-xs text-center opacity-60">Generate a new passkey on this device</p>
+                </>
+              ) : (
+                /* No passkey on-chain yet - show Generate as PRIMARY, Login as SECONDARY */
+                <>
+                  <button
+                    className="btn btn-primary w-full btn-lg"
+                    onClick={handleGeneratePasskey}
+                    disabled={isGeneratingPasskey || isLoggingIn}
+                  >
+                    {isGeneratingPasskey ? (
+                      <>
+                        <span className="loading loading-spinner loading-sm"></span>
+                        Generating...
+                      </>
+                    ) : (
+                      "Generate New Passkey"
+                    )}
+                  </button>
+                  <p className="text-xs text-center opacity-60">
+                    Create your first passkey to enable gasless transactions
+                  </p>
+                  <div className="divider text-xs opacity-60">OR</div>
+                  <button
+                    className="btn btn-ghost btn-sm w-full"
+                    onClick={handleLoginWithPasskey}
+                    disabled={isGeneratingPasskey || isLoggingIn}
+                  >
+                    {isLoggingIn ? (
+                      <>
+                        <span className="loading loading-spinner loading-xs"></span>
+                        Authenticating...
+                      </>
+                    ) : (
+                      "Login with Existing Passkey"
+                    )}
+                  </button>
+                  <p className="text-xs text-center opacity-60">Use a passkey you already have on this device</p>
+                </>
+              )}
+            </div>
+          )}
+        </div>
+
+        {/* Send ETH with Passkey Section - Only when passkey is active operator */}
+        {currentPasskey && isPasskeyOperator && (
+          <div className="bg-base-200 rounded-3xl p-6 mb-8">
+            <h2 className="text-2xl font-semibold mb-4">Send ETH with Passkey</h2>
+            <p className="text-sm opacity-60 mb-4">
+              Sign a transaction with your passkey. Anyone can then relay it to the network and pay the gas.
+            </p>
+
+            <div className="space-y-4">
+              {/* Recipient Address */}
+              <div className="bg-base-100 rounded-xl p-4">
+                <p className="text-sm font-medium opacity-60 mb-2">Recipient Address</p>
+                <AddressInput
+                  value={passkeyRecipient}
+                  onChange={setPasskeyRecipient}
+                  placeholder="Enter recipient address or ENS"
+                />
+              </div>
+
+              {/* Amount */}
+              <div className="bg-base-100 rounded-xl p-4">
+                <p className="text-sm font-medium opacity-60 mb-2">Amount (ETH)</p>
+                <input
+                  type="text"
+                  placeholder="0.0"
+                  value={passkeyAmount}
+                  onChange={e => setPasskeyAmount(e.target.value)}
+                  className="input input-bordered w-full"
+                />
+              </div>
+
+              {/* Sign Button */}
+              <button
+                className="btn btn-primary w-full"
+                onClick={handleSignWithPasskey}
+                disabled={
+                  isSigningWithPasskey ||
+                  !passkeyRecipient ||
+                  !passkeyAmount ||
+                  !finalPasskeyRecipient ||
+                  !isAddress(finalPasskeyRecipient)
+                }
+              >
+                {isSigningWithPasskey ? (
+                  <>
+                    <span className="loading loading-spinner loading-sm"></span>
+                    Signing...
+                  </>
+                ) : (
+                  "Sign with Passkey"
+                )}
+              </button>
+
+              {/* Signed Transaction Display */}
+              {signedMetaTx && (
+                <div className="bg-base-100 rounded-xl p-4 space-y-4">
+                  <div className="flex items-center justify-between">
+                    <p className="text-sm font-medium text-success">Transaction Signed!</p>
+                    <button className="btn btn-xs btn-ghost" onClick={handleClearSignedTx}>
+                      Clear
+                    </button>
+                  </div>
+
+                  {/* Transaction Summary */}
+                  <div className="space-y-2 text-sm">
+                    <div className="flex justify-between">
+                      <span className="opacity-60">To:</span>
+                      <Address address={signedMetaTx.target} />
+                    </div>
+                    <div className="flex justify-between">
+                      <span className="opacity-60">Amount:</span>
+                      <span>{formatEther(signedMetaTx.value)} ETH</span>
+                    </div>
+                    <div className="flex justify-between">
+                      <span className="opacity-60">Deadline:</span>
+                      <span>{new Date(Number(signedMetaTx.deadline) * 1000).toLocaleString()}</span>
+                    </div>
+                  </div>
+
+                  {/* Copy JSON Button */}
+                  <details className="collapse collapse-arrow bg-base-200">
+                    <summary className="collapse-title text-sm font-medium">View/Copy Transaction JSON</summary>
+                    <div className="collapse-content">
+                      <pre className="text-xs font-mono bg-base-300 rounded-lg p-3 overflow-x-auto whitespace-pre-wrap">
+                        {JSON.stringify(
+                          {
+                            target: signedMetaTx.target,
+                            value: signedMetaTx.value.toString(),
+                            data: signedMetaTx.data,
+                            qx: signedMetaTx.qx,
+                            qy: signedMetaTx.qy,
+                            deadline: signedMetaTx.deadline.toString(),
+                            auth: {
+                              r: signedMetaTx.auth.r,
+                              s: signedMetaTx.auth.s,
+                              challengeIndex: signedMetaTx.auth.challengeIndex.toString(),
+                              typeIndex: signedMetaTx.auth.typeIndex.toString(),
+                              authenticatorData: signedMetaTx.auth.authenticatorData,
+                              clientDataJSON: signedMetaTx.auth.clientDataJSON,
+                            },
+                          },
+                          null,
+                          2,
+                        )}
+                      </pre>
+                      <button
+                        className="btn btn-xs btn-ghost mt-2"
+                        onClick={() => {
+                          navigator.clipboard.writeText(
+                            JSON.stringify({
+                              target: signedMetaTx.target,
+                              value: signedMetaTx.value.toString(),
+                              data: signedMetaTx.data,
+                              qx: signedMetaTx.qx,
+                              qy: signedMetaTx.qy,
+                              deadline: signedMetaTx.deadline.toString(),
+                              auth: {
+                                r: signedMetaTx.auth.r,
+                                s: signedMetaTx.auth.s,
+                                challengeIndex: signedMetaTx.auth.challengeIndex.toString(),
+                                typeIndex: signedMetaTx.auth.typeIndex.toString(),
+                                authenticatorData: signedMetaTx.auth.authenticatorData,
+                                clientDataJSON: signedMetaTx.auth.clientDataJSON,
+                              },
+                            }),
+                          );
+                        }}
+                      >
+                        Copy to clipboard
+                      </button>
+                    </div>
+                  </details>
+
+                  {/* Relay Button */}
+                  <div className="divider text-xs opacity-60">Anyone can relay this transaction</div>
+                  <button className="btn btn-secondary w-full" onClick={handleRelayTransaction} disabled={isRelaying}>
+                    {isRelaying ? (
+                      <>
+                        <span className="loading loading-spinner loading-sm"></span>
+                        Relaying...
+                      </>
+                    ) : connectedAddress ? (
+                      "Relay Transaction (Pay Gas)"
+                    ) : (
+                      "Connect Wallet to Relay"
+                    )}
+                  </button>
+                  <p className="text-xs text-center opacity-60">
+                    The relayer pays gas. The passkey holder pays nothing.
+                  </p>
+                </div>
+              )}
+            </div>
           </div>
         )}
 

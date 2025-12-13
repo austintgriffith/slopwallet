@@ -18,6 +18,8 @@
   "dependencies": {
     "@heroicons/react": "~2.1.5",
     "@impersonator/iframe": "0.4.0",
+    "@noble/curves": "^2.0.1",
+    "@noble/hashes": "^2.0.1",
     "@rainbow-me/rainbowkit": "2.2.8",
     "@reown/walletkit": "^1.4.1",
     "@scaffold-ui/components": "^0.1.3",
