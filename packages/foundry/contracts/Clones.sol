@@ -49,19 +49,22 @@ library Clones {
         bytes32 salt,
         address deployer
     ) internal pure returns (address predicted) {
+        // First compute the init code hash
+        bytes32 initCodeHash;
         assembly {
             let ptr := mload(0x40)
             mstore(ptr, 0x3d602d80600a3d3981f3363d3d373d3d3d363d73000000000000000000000000)
             mstore(add(ptr, 0x14), shl(0x60, implementation))
             mstore(add(ptr, 0x28), 0x5af43d82803e903d91602b57fd5bf30000000000000000000000000000000000)
-            
-            // Compute the CREATE2 address
-            // keccak256(0xff ++ deployer ++ salt ++ keccak256(bytecode))
-            mstore(add(ptr, 0x37), keccak256(ptr, 0x37))
-            mstore(ptr, shl(0x60, deployer))
-            mstore8(ptr, 0xff)
-            mstore(add(ptr, 0x15), salt)
-            predicted := and(keccak256(ptr, 0x55), 0xffffffffffffffffffffffffffffffffffffffff)
+            initCodeHash := keccak256(ptr, 0x37)
         }
+        
+        // CREATE2 address = keccak256(0xff ++ deployer ++ salt ++ initCodeHash)[12:]
+        predicted = address(uint160(uint256(keccak256(abi.encodePacked(
+            bytes1(0xff),
+            deployer,
+            salt,
+            initCodeHash
+        )))));
     }
 }

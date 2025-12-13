@@ -1,6 +1,6 @@
 import { p256 } from "@noble/curves/nist.js";
 import { sha256 } from "@noble/hashes/sha2.js";
-import { concat, keccak256, toHex } from "viem";
+import { concat, encodeAbiParameters, keccak256, toHex } from "viem";
 
 // Types
 export interface StoredPasskey {
@@ -392,6 +392,50 @@ export function buildChallengeHash(
     target,
     toHex(value, { size: 32 }),
     data,
+    toHex(nonce, { size: 32 }),
+    toHex(deadline, { size: 32 }),
+  ]);
+
+  return keccak256(packedData);
+}
+
+/**
+ * Build the challenge hash for batch transactions (matches contract's metaBatchExecPasskey)
+ */
+export function buildBatchChallengeHash(
+  chainId: bigint,
+  walletAddress: `0x${string}`,
+  calls: Array<{ target: `0x${string}`; value: bigint; data: `0x${string}` }>,
+  nonce: bigint,
+  deadline: bigint,
+): `0x${string}` {
+  // Match the contract's encoding:
+  // keccak256(abi.encodePacked(chainId, address(this), keccak256(abi.encode(calls)), nonce, deadline))
+
+  // First, encode the calls array using abi.encode (not packed!)
+  // The Call struct is: { address target, uint256 value, bytes data }
+  const encodedCalls = encodeAbiParameters(
+    [
+      {
+        type: "tuple[]",
+        components: [
+          { name: "target", type: "address" },
+          { name: "value", type: "uint256" },
+          { name: "data", type: "bytes" },
+        ],
+      },
+    ],
+    [calls.map(c => ({ target: c.target, value: c.value, data: c.data }))],
+  );
+
+  // Hash the encoded calls
+  const callsHash = keccak256(encodedCalls);
+
+  // Pack everything together
+  const packedData = concat([
+    toHex(chainId, { size: 32 }),
+    walletAddress,
+    callsHash,
     toHex(nonce, { size: 32 }),
     toHex(deadline, { size: 32 }),
   ]);

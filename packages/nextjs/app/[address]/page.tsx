@@ -1992,7 +1992,15 @@ What I want to do: `);
 
         {/* WalletConnect Section - Only for owners/operators */}
         {connectedAddress && hasPermissions && !isLoading && (
-          <WalletConnectSection smartWalletAddress={walletAddress} />
+          <WalletConnectSection
+            smartWalletAddress={walletAddress}
+            currentPasskey={currentPasskey}
+            isPasskeyOperator={!!isPasskeyOperator}
+            passkeyNonce={passkeyNonce}
+            refetchPasskeyNonce={async () => {
+              await refetchPasskeyNonce();
+            }}
+          />
         )}
       </div>
 

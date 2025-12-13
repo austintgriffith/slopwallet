@@ -4,7 +4,7 @@ import { useState } from "react";
 import Image from "next/image";
 import { Address } from "@scaffold-ui/components";
 import { formatEther } from "viem";
-import { useAccount, usePublicClient, useWalletClient, useWriteContract } from "wagmi";
+import { useAccount, useChainId, usePublicClient, useWalletClient, useWriteContract } from "wagmi";
 import { QrScannerModal } from "~~/components/scaffold-eth/QrScannerModal";
 import { SMART_WALLET_ABI } from "~~/contracts/SmartWalletAbi";
 import {
@@ -13,18 +13,36 @@ import {
   SessionRequest,
   useWalletConnect,
 } from "~~/hooks/scaffold-eth/useWalletConnect";
+import {
+  StoredPasskey,
+  WebAuthnAuth,
+  buildBatchChallengeHash,
+  buildChallengeHash,
+  signWithPasskey,
+} from "~~/utils/passkey";
 
 interface WalletConnectSectionProps {
   smartWalletAddress: string;
+  currentPasskey: StoredPasskey | null;
+  isPasskeyOperator: boolean;
+  passkeyNonce: bigint | undefined;
+  refetchPasskeyNonce: () => Promise<void>;
 }
 
-export const WalletConnectSection = ({ smartWalletAddress }: WalletConnectSectionProps) => {
+export const WalletConnectSection = ({
+  smartWalletAddress,
+  currentPasskey,
+  isPasskeyOperator,
+  passkeyNonce,
+  refetchPasskeyNonce,
+}: WalletConnectSectionProps) => {
   const [wcUri, setWcUri] = useState("");
   const [isScanning, setIsScanning] = useState(false);
 
   // Get wallet client and owner address for signing
   const { address: ownerAddress } = useAccount();
   const { data: walletClient } = useWalletClient();
+  const chainId = useChainId();
 
   const {
     status,
@@ -158,6 +176,11 @@ export const WalletConnectSection = ({ smartWalletAddress }: WalletConnectSectio
                 onReject={rejectRequest}
                 onClear={() => clearRequest(request.id)}
                 updateBatchStatus={updateBatchStatus}
+                currentPasskey={currentPasskey}
+                isPasskeyOperator={isPasskeyOperator}
+                passkeyNonce={passkeyNonce}
+                refetchPasskeyNonce={refetchPasskeyNonce}
+                chainId={chainId}
               />
             ))}
           </div>
@@ -201,6 +224,22 @@ const ActiveSessionCard = ({ session, onDisconnect }: { session: ActiveSession; 
   );
 };
 
+// Signed meta transaction type
+interface SignedMetaTx {
+  isBatch: boolean;
+  // For single tx
+  target?: `0x${string}`;
+  value?: bigint;
+  data?: `0x${string}`;
+  // For batch tx
+  calls?: Array<{ target: `0x${string}`; value: bigint; data: `0x${string}` }>;
+  // Common fields
+  qx: `0x${string}`;
+  qy: `0x${string}`;
+  deadline: bigint;
+  auth: WebAuthnAuth;
+}
+
 // Session Request Card Component
 const SessionRequestCard = ({
   request,
@@ -209,6 +248,11 @@ const SessionRequestCard = ({
   onReject,
   onClear,
   updateBatchStatus,
+  currentPasskey,
+  isPasskeyOperator,
+  passkeyNonce,
+  refetchPasskeyNonce,
+  chainId,
 }: {
   request: SessionRequest;
   smartWalletAddress: string;
@@ -216,12 +260,21 @@ const SessionRequestCard = ({
   onReject: (requestId: number, topic: string) => Promise<void>;
   onClear: () => void;
   updateBatchStatus: (batchId: string, updates: Partial<BatchCallStatus>) => void;
+  currentPasskey: StoredPasskey | null;
+  isPasskeyOperator: boolean;
+  passkeyNonce: bigint | undefined;
+  refetchPasskeyNonce: () => Promise<void>;
+  chainId: number;
 }) => {
   const [isExecuting, setIsExecuting] = useState(false);
   const [txError, setTxError] = useState<string | null>(null);
+  const [isSigningWithPasskey, setIsSigningWithPasskey] = useState(false);
+  const [signedMetaTx, setSignedMetaTx] = useState<SignedMetaTx | null>(null);
+  const [isRelaying, setIsRelaying] = useState(false);
 
   const { writeContractAsync } = useWriteContract();
   const publicClient = usePublicClient();
+  const { address: connectedAddress } = useAccount();
 
   const getMethodLabel = (method: string) => {
     switch (method) {
@@ -369,6 +422,234 @@ const SessionRequestCard = ({
     } finally {
       setIsExecuting(false);
     }
+  };
+
+  // Sign transaction with passkey
+  const handleSignWithPasskey = async () => {
+    if (!currentPasskey || passkeyNonce === undefined) {
+      setTxError("Passkey not available or nonce not loaded");
+      return;
+    }
+
+    setIsSigningWithPasskey(true);
+    setTxError(null);
+    setSignedMetaTx(null);
+
+    try {
+      const deadline = BigInt(Math.floor(Date.now() / 1000) + 3600); // 1 hour from now
+
+      if (isBatchCall && request.calls && request.calls.length > 0) {
+        // Handle batch transaction
+        const calls = request.calls.map(call => ({
+          target: (call.to || "0x0000000000000000000000000000000000000000") as `0x${string}`,
+          value: call.value ? BigInt(call.value) : 0n,
+          data: (call.data || "0x") as `0x${string}`,
+        }));
+
+        // Build the challenge hash for batch
+        const challengeHash = buildBatchChallengeHash(
+          BigInt(chainId),
+          smartWalletAddress as `0x${string}`,
+          calls,
+          passkeyNonce,
+          deadline,
+        );
+
+        // Convert hash to Uint8Array for WebAuthn
+        const challengeBytes = new Uint8Array(
+          (challengeHash.slice(2).match(/.{2}/g) || []).map(byte => parseInt(byte, 16)),
+        );
+
+        // Sign with passkey
+        const { auth } = await signWithPasskey(currentPasskey.credentialId, challengeBytes);
+
+        setSignedMetaTx({
+          isBatch: true,
+          calls,
+          qx: currentPasskey.qx,
+          qy: currentPasskey.qy,
+          deadline,
+          auth,
+        });
+      } else {
+        // Handle single transaction
+        const target = (request.params.to || "0x0000000000000000000000000000000000000000") as `0x${string}`;
+        const value = request.params.value ? BigInt(request.params.value) : 0n;
+        const data = (request.params.data || "0x") as `0x${string}`;
+
+        // Build the challenge hash for single tx
+        const challengeHash = buildChallengeHash(
+          BigInt(chainId),
+          smartWalletAddress as `0x${string}`,
+          target,
+          value,
+          data,
+          passkeyNonce,
+          deadline,
+        );
+
+        // Convert hash to Uint8Array for WebAuthn
+        const challengeBytes = new Uint8Array(
+          (challengeHash.slice(2).match(/.{2}/g) || []).map(byte => parseInt(byte, 16)),
+        );
+
+        // Sign with passkey
+        const { auth } = await signWithPasskey(currentPasskey.credentialId, challengeBytes);
+
+        setSignedMetaTx({
+          isBatch: false,
+          target,
+          value,
+          data,
+          qx: currentPasskey.qx,
+          qy: currentPasskey.qy,
+          deadline,
+          auth,
+        });
+      }
+    } catch (err) {
+      console.error("Failed to sign with passkey:", err);
+      setTxError(err instanceof Error ? err.message : "Failed to sign with passkey");
+    } finally {
+      setIsSigningWithPasskey(false);
+    }
+  };
+
+  // Relay the signed meta transaction
+  const handleRelayTransaction = async () => {
+    if (!signedMetaTx) {
+      setTxError("No signed transaction to relay");
+      return;
+    }
+
+    setIsRelaying(true);
+    setTxError(null);
+
+    try {
+      let txHash: string;
+
+      if (signedMetaTx.isBatch && signedMetaTx.calls) {
+        // Relay batch transaction via metaBatchExecPasskey
+        txHash = await writeContractAsync({
+          address: smartWalletAddress as `0x${string}`,
+          abi: SMART_WALLET_ABI,
+          functionName: "metaBatchExecPasskey",
+          args: [
+            signedMetaTx.calls,
+            signedMetaTx.qx,
+            signedMetaTx.qy,
+            signedMetaTx.deadline,
+            {
+              r: signedMetaTx.auth.r,
+              s: signedMetaTx.auth.s,
+              challengeIndex: signedMetaTx.auth.challengeIndex,
+              typeIndex: signedMetaTx.auth.typeIndex,
+              authenticatorData: signedMetaTx.auth.authenticatorData,
+              clientDataJSON: signedMetaTx.auth.clientDataJSON,
+            },
+          ],
+        });
+      } else {
+        // Relay single transaction via metaExecPasskey
+        txHash = await writeContractAsync({
+          address: smartWalletAddress as `0x${string}`,
+          abi: SMART_WALLET_ABI,
+          functionName: "metaExecPasskey",
+          args: [
+            signedMetaTx.target!,
+            signedMetaTx.value!,
+            signedMetaTx.data!,
+            signedMetaTx.qx,
+            signedMetaTx.qy,
+            signedMetaTx.deadline,
+            {
+              r: signedMetaTx.auth.r,
+              s: signedMetaTx.auth.s,
+              challengeIndex: signedMetaTx.auth.challengeIndex,
+              typeIndex: signedMetaTx.auth.typeIndex,
+              authenticatorData: signedMetaTx.auth.authenticatorData,
+              clientDataJSON: signedMetaTx.auth.clientDataJSON,
+            },
+          ],
+        });
+      }
+
+      console.log("Meta transaction relayed:", txHash);
+
+      // Handle EIP-5792 wallet_sendCalls response
+      if (isBatchCall && request.batchId) {
+        if (!publicClient) {
+          console.error("Public client not available, cannot fetch receipt");
+          updateBatchStatus(request.batchId, {
+            status: 500,
+            txHash,
+          });
+          setSignedMetaTx(null);
+          onClear();
+          await refetchPasskeyNonce();
+          return;
+        }
+
+        try {
+          const receipt = await publicClient.waitForTransactionReceipt({
+            hash: txHash as `0x${string}`,
+          });
+
+          const formattedReceipt = {
+            logs: receipt.logs.map(log => ({
+              address: log.address,
+              data: log.data,
+              topics: log.topics,
+            })),
+            status: receipt.status === "success" ? "0x1" : "0x0",
+            blockHash: receipt.blockHash,
+            blockNumber: `0x${receipt.blockNumber.toString(16)}`,
+            gasUsed: `0x${receipt.gasUsed.toString(16)}`,
+            transactionHash: receipt.transactionHash,
+          };
+
+          updateBatchStatus(request.batchId, {
+            status: 200,
+            txHash,
+            receipts: [formattedReceipt],
+          });
+
+          console.log("✅ Batch meta transaction confirmed");
+        } catch (receiptError) {
+          console.error("Failed to get transaction receipt:", receiptError);
+          updateBatchStatus(request.batchId, {
+            status: 500,
+            txHash,
+          });
+        }
+
+        setSignedMetaTx(null);
+        onClear();
+      } else {
+        // For regular eth_sendTransaction, send the transaction hash back to the dApp
+        await onApprove(request.id, request.topic, txHash);
+        setSignedMetaTx(null);
+      }
+
+      // Refetch nonce for next transaction
+      await refetchPasskeyNonce();
+    } catch (err) {
+      console.error("Failed to relay transaction:", err);
+      setTxError(err instanceof Error ? err.message : "Failed to relay transaction");
+
+      if (isBatchCall && request.batchId) {
+        updateBatchStatus(request.batchId, {
+          status: 500,
+        });
+      }
+    } finally {
+      setIsRelaying(false);
+    }
+  };
+
+  // Clear signed meta transaction
+  const handleClearSignedTx = () => {
+    setSignedMetaTx(null);
   };
 
   return (
@@ -535,22 +816,185 @@ const SessionRequestCard = ({
       )}
 
       {/* Action Buttons */}
-      {(isTransaction || isBatchCall) && (
-        <div className="flex gap-2 mt-4">
-          <button className="btn btn-primary flex-1" onClick={handleExecute} disabled={isExecuting}>
-            {isExecuting ? (
+      {(isTransaction || isBatchCall) && !signedMetaTx && (
+        <div className="space-y-3 mt-4">
+          {/* Primary Execute Button (Owner/Operator) */}
+          <div className="flex gap-2">
+            <button
+              className="btn btn-primary flex-1"
+              onClick={handleExecute}
+              disabled={isExecuting || isSigningWithPasskey}
+            >
+              {isExecuting ? (
+                <>
+                  <span className="loading loading-spinner loading-sm"></span>
+                  Executing...
+                </>
+              ) : isBatchCall ? (
+                `Execute ${request.calls?.length || 0} Calls`
+              ) : (
+                "Execute Transaction"
+              )}
+            </button>
+            <button className="btn btn-ghost" onClick={handleReject} disabled={isExecuting || isSigningWithPasskey}>
+              Reject
+            </button>
+          </div>
+
+          {/* Passkey Signing Option */}
+          {isPasskeyOperator && currentPasskey && (
+            <>
+              <div className="divider text-xs opacity-60 my-2">OR sign with passkey</div>
+              <button
+                className="btn btn-secondary w-full"
+                onClick={handleSignWithPasskey}
+                disabled={isSigningWithPasskey || isExecuting || passkeyNonce === undefined}
+              >
+                {isSigningWithPasskey ? (
+                  <>
+                    <span className="loading loading-spinner loading-sm"></span>
+                    Signing...
+                  </>
+                ) : (
+                  "Sign with Passkey"
+                )}
+              </button>
+              <p className="text-xs text-center opacity-60">Sign now, anyone can relay later and pay gas</p>
+            </>
+          )}
+        </div>
+      )}
+
+      {/* Signed Meta Transaction Display */}
+      {signedMetaTx && (
+        <div className="bg-success/10 border border-success rounded-xl p-4 mt-4 space-y-4">
+          <div className="flex items-center justify-between">
+            <p className="text-sm font-medium text-success">Transaction Signed!</p>
+            <button className="btn btn-xs btn-ghost" onClick={handleClearSignedTx}>
+              Clear
+            </button>
+          </div>
+
+          {/* Transaction Summary */}
+          <div className="space-y-2 text-sm">
+            {signedMetaTx.isBatch ? (
+              <div className="flex justify-between">
+                <span className="opacity-60">Batch:</span>
+                <span>{signedMetaTx.calls?.length || 0} call(s)</span>
+              </div>
+            ) : (
+              <>
+                <div className="flex justify-between">
+                  <span className="opacity-60">To:</span>
+                  <Address address={signedMetaTx.target!} />
+                </div>
+                <div className="flex justify-between">
+                  <span className="opacity-60">Value:</span>
+                  <span>{formatEther(signedMetaTx.value!)} ETH</span>
+                </div>
+              </>
+            )}
+            <div className="flex justify-between">
+              <span className="opacity-60">Deadline:</span>
+              <span>{new Date(Number(signedMetaTx.deadline) * 1000).toLocaleString()}</span>
+            </div>
+          </div>
+
+          {/* Copy JSON Button */}
+          <details className="collapse collapse-arrow bg-base-200">
+            <summary className="collapse-title text-sm font-medium">View/Copy Transaction JSON</summary>
+            <div className="collapse-content">
+              <pre className="text-xs font-mono bg-base-300 rounded-lg p-3 overflow-x-auto whitespace-pre-wrap">
+                {JSON.stringify(
+                  {
+                    isBatch: signedMetaTx.isBatch,
+                    ...(signedMetaTx.isBatch
+                      ? {
+                          calls: signedMetaTx.calls?.map(c => ({
+                            target: c.target,
+                            value: c.value.toString(),
+                            data: c.data,
+                          })),
+                        }
+                      : {
+                          target: signedMetaTx.target,
+                          value: signedMetaTx.value?.toString(),
+                          data: signedMetaTx.data,
+                        }),
+                    qx: signedMetaTx.qx,
+                    qy: signedMetaTx.qy,
+                    deadline: signedMetaTx.deadline.toString(),
+                    auth: {
+                      r: signedMetaTx.auth.r,
+                      s: signedMetaTx.auth.s,
+                      challengeIndex: signedMetaTx.auth.challengeIndex.toString(),
+                      typeIndex: signedMetaTx.auth.typeIndex.toString(),
+                      authenticatorData: signedMetaTx.auth.authenticatorData,
+                      clientDataJSON: signedMetaTx.auth.clientDataJSON,
+                    },
+                  },
+                  null,
+                  2,
+                )}
+              </pre>
+              <button
+                className="btn btn-xs btn-ghost mt-2"
+                onClick={() => {
+                  navigator.clipboard.writeText(
+                    JSON.stringify({
+                      isBatch: signedMetaTx.isBatch,
+                      ...(signedMetaTx.isBatch
+                        ? {
+                            calls: signedMetaTx.calls?.map(c => ({
+                              target: c.target,
+                              value: c.value.toString(),
+                              data: c.data,
+                            })),
+                          }
+                        : {
+                            target: signedMetaTx.target,
+                            value: signedMetaTx.value?.toString(),
+                            data: signedMetaTx.data,
+                          }),
+                      qx: signedMetaTx.qx,
+                      qy: signedMetaTx.qy,
+                      deadline: signedMetaTx.deadline.toString(),
+                      auth: {
+                        r: signedMetaTx.auth.r,
+                        s: signedMetaTx.auth.s,
+                        challengeIndex: signedMetaTx.auth.challengeIndex.toString(),
+                        typeIndex: signedMetaTx.auth.typeIndex.toString(),
+                        authenticatorData: signedMetaTx.auth.authenticatorData,
+                        clientDataJSON: signedMetaTx.auth.clientDataJSON,
+                      },
+                    }),
+                  );
+                }}
+              >
+                Copy to clipboard
+              </button>
+            </div>
+          </details>
+
+          {/* Relay Button */}
+          <div className="divider text-xs opacity-60">Anyone can relay this transaction</div>
+          <button className="btn btn-primary w-full" onClick={handleRelayTransaction} disabled={isRelaying}>
+            {isRelaying ? (
               <>
                 <span className="loading loading-spinner loading-sm"></span>
-                Executing...
+                Relaying...
               </>
-            ) : isBatchCall ? (
-              `Execute ${request.calls?.length || 0} Calls`
+            ) : connectedAddress ? (
+              "Relay Transaction (Pay Gas)"
             ) : (
-              "Execute Transaction"
+              "Connect Wallet to Relay"
             )}
           </button>
-          <button className="btn btn-ghost" onClick={handleReject} disabled={isExecuting}>
-            Reject
+          <p className="text-xs text-center opacity-60">The relayer pays gas. The passkey holder pays nothing.</p>
+
+          {/* Cancel/Reject option */}
+          <button className="btn btn-ghost btn-sm w-full" onClick={handleReject} disabled={isRelaying}>
+            Reject Request
           </button>
         </div>
       )}
