@@ -3,9 +3,11 @@ pragma solidity >=0.8.0 <0.9.0;
 
 import "forge-std/Test.sol";
 import "../contracts/SmartWallet.sol";
+import "../contracts/Clones.sol";
 
 contract SmartWalletTest is Test {
     SmartWallet public wallet;
+    SmartWallet public implementation;
     address public owner;
     uint256 public ownerPrivateKey;
     address public operator;
@@ -28,8 +30,13 @@ contract SmartWalletTest is Test {
         unauthorizedPrivateKey = 0xBAD;
         unauthorized = vm.addr(unauthorizedPrivateKey);
 
-        // Deploy smart wallet
-        wallet = new SmartWallet(owner);
+        // Deploy implementation (constructor disables initializers)
+        implementation = new SmartWallet();
+        
+        // Deploy a clone (like the Factory does) and initialize it
+        address clone = Clones.cloneDeterministic(address(implementation), bytes32(0));
+        wallet = SmartWallet(payable(clone));
+        wallet.initialize(owner);
 
         // Add operator
         vm.prank(owner);

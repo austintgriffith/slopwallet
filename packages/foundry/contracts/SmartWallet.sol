@@ -6,6 +6,7 @@ import "@openzeppelin/contracts/interfaces/IERC1271.sol";
 import "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
 // import "@openzeppelin/contracts/utils/cryptography/MessageHashUtils.sol"; // Only needed for EOA metaExec
 import "@openzeppelin/contracts/utils/cryptography/WebAuthn.sol";
+import "@openzeppelin/contracts/proxy/utils/Initializable.sol";
 
 /**
  * @title SmartWallet
@@ -13,7 +14,7 @@ import "@openzeppelin/contracts/utils/cryptography/WebAuthn.sol";
  * @notice Supports ERC-1271 signature validation for off-chain signing
  * @author BuidlGuidl
  */
-contract SmartWallet is Ownable, IERC1271 {
+contract SmartWallet is Ownable, IERC1271, Initializable {
     struct Call {
         address target;
         uint256 value;
@@ -52,7 +53,18 @@ contract SmartWallet is Ownable, IERC1271 {
     error PasskeyNotRegistered();
     // error UseMetaExecPasskey(); // Only needed for EOA metaExec
 
-    constructor(address _owner) Ownable(_owner) {}
+    /// @custom:oz-upgrades-unsafe-allow constructor
+    constructor() Ownable(address(1)) {
+        _disableInitializers();
+    }
+
+    /**
+     * @notice Initialize the wallet with an owner (called by Factory on clone deployment)
+     * @param _owner The address of the wallet owner
+     */
+    function initialize(address _owner) external initializer {
+        _transferOwnership(_owner);
+    }
 
     modifier onlyOwnerOrOperator() {
         if (msg.sender != owner() && !operators[msg.sender]) revert NotAuthorized();

@@ -2,10 +2,17 @@
 export const SMART_WALLET_ABI = [
   {
     type: "constructor",
-    inputs: [{ name: "_owner", type: "address" }],
+    inputs: [],
     stateMutability: "nonpayable",
   },
   { type: "receive", stateMutability: "payable" },
+  {
+    type: "function",
+    name: "initialize",
+    inputs: [{ name: "_owner", type: "address" }],
+    outputs: [],
+    stateMutability: "nonpayable",
+  },
   {
     type: "function",
     name: "addOperator",
@@ -324,6 +331,14 @@ export const SMART_WALLET_ABI = [
     ],
     anonymous: false,
   },
+  {
+    type: "event",
+    name: "Initialized",
+    inputs: [{ name: "version", type: "uint64", indexed: false }],
+    anonymous: false,
+  },
+  { type: "error", name: "InvalidInitialization", inputs: [] },
+  { type: "error", name: "NotInitializing", inputs: [] },
   { type: "error", name: "ECDSAInvalidSignature", inputs: [] },
   {
     type: "error",

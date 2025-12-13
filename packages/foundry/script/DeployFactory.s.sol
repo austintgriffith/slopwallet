@@ -2,10 +2,11 @@
 pragma solidity ^0.8.19;
 
 import "./DeployHelpers.s.sol";
+import "../contracts/SmartWallet.sol";
 import "../contracts/Factory.sol";
 
 /**
- * @notice Deploy script for Factory contract
+ * @notice Deploy script for SmartWallet implementation and Factory contract
  * @dev Inherits ScaffoldETHDeploy which:
  *      - Includes forge-std/Script.sol for deployment
  *      - Includes ScaffoldEthDeployerRunner modifier
@@ -25,8 +26,10 @@ contract DeployFactory is ScaffoldETHDeploy {
      *      - Export contract addresses & ABIs to `nextjs` packages
      */
     function run() external ScaffoldEthDeployerRunner {
-        new Factory();
+        // Deploy the SmartWallet implementation (clones will delegate to this)
+        SmartWallet implementation = new SmartWallet();
+        
+        // Deploy the Factory with the implementation address
+        new Factory(address(implementation));
     }
 }
-
-
