@@ -2146,18 +2146,16 @@ What I want to do: `);
           </div>
         )}
 
-        {/* WalletConnect Section - Only for owners */}
-        {connectedAddress && hasPermissions && !isLoading && (
-          <WalletConnectSection
-            smartWalletAddress={walletAddress}
-            currentPasskey={currentPasskey}
-            isPasskeyOperator={!!isPasskeyRegistered}
-            passkeyNonce={passkeyNonce}
-            refetchPasskeyNonce={async () => {
-              await refetchPasskeyNonce();
-            }}
-          />
-        )}
+        {/* WalletConnect Section - Always visible */}
+        <WalletConnectSection
+          smartWalletAddress={walletAddress}
+          currentPasskey={currentPasskey}
+          isPasskeyOperator={!!isPasskeyRegistered}
+          passkeyNonce={passkeyNonce}
+          refetchPasskeyNonce={async () => {
+            await refetchPasskeyNonce();
+          }}
+        />
       </div>
 
       {/* Impersonator Section - Available when passkey is registered (full width) */}
