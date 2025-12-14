@@ -50,11 +50,19 @@ const WETH_ADDRESS_BASE = "0x4200000000000000000000000000000000000006" as const;
 // Uniswap V3 SwapRouter02 on Base
 const SWAP_ROUTER_ADDRESS = "0x2626664c2603336E57B271c5C0b26F421741e481" as const;
 
-// Base RPC URL for Impersonator
-const BASE_RPC_URL =
-  scaffoldConfig.alchemyApiKey && scaffoldConfig.alchemyApiKey !== "oKxs-03sij-U_N0iOlrSsZFr29-IqbuF"
-    ? `https://base-mainnet.g.alchemy.com/v2/${scaffoldConfig.alchemyApiKey}`
-    : "https://mainnet.base.org";
+// Get RPC URL for Impersonator based on target network
+const getImpersonatorRpcUrl = (chainId: number) => {
+  // Base (8453) - use Alchemy
+  if (chainId === 8453) {
+    return `https://base-mainnet.g.alchemy.com/v2/${scaffoldConfig.alchemyApiKey}`;
+  }
+  // Mainnet (1) - use BuidlGuidl RPC
+  if (chainId === 1) {
+    return "https://mainnet.rpc.buidlguidl.com";
+  }
+  // Fallback to Base Alchemy
+  return `https://base-mainnet.g.alchemy.com/v2/${scaffoldConfig.alchemyApiKey}`;
+};
 
 const ERC20_ABI = [
   {
@@ -2193,14 +2201,14 @@ What I want to do: `);
                 <div className="border-2 border-base-300 rounded-xl overflow-hidden">
                   <ImpersonatorIframeProvider
                     address={walletAddress}
-                    rpcUrl={BASE_RPC_URL}
+                    rpcUrl={getImpersonatorRpcUrl(targetNetwork.id)}
                     sendTransaction={handleImpersonatorTransaction}
                   >
                     <ImpersonatorIframe
-                      key={debouncedAppUrl + walletAddress}
+                      key={debouncedAppUrl + walletAddress + targetNetwork.id}
                       src={debouncedAppUrl}
                       address={walletAddress}
-                      rpcUrl={BASE_RPC_URL}
+                      rpcUrl={getImpersonatorRpcUrl(targetNetwork.id)}
                       width="100%"
                       height="1200px"
                     />
