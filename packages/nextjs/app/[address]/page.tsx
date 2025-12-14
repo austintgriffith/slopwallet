@@ -4,15 +4,24 @@ import { useEffect, useState } from "react";
 import { useParams } from "next/navigation";
 import { ImpersonatorIframe, ImpersonatorIframeProvider } from "@impersonator/iframe";
 import { Address, AddressInput, Balance } from "@scaffold-ui/components";
+import { QRCodeSVG } from "qrcode.react";
 import { useDebounceValue } from "usehooks-ts";
 import { encodeFunctionData, formatEther, formatUnits, isAddress, isHex, parseEther, parseUnits } from "viem";
-import { base } from "viem/chains";
+import { base, hardhat } from "viem/chains";
 import { normalize } from "viem/ens";
 import { useAccount, useBalance, useChainId, useConfig, useEnsAddress, useReadContract, useWriteContract } from "wagmi";
 import { readContract } from "wagmi/actions";
-import { WalletConnectSection } from "~~/components/scaffold-eth";
+import { QrCodeIcon } from "@heroicons/react/24/outline";
+import { PendingTransactionQueue, WalletConnectSection } from "~~/components/scaffold-eth";
 import { SMART_WALLET_ABI } from "~~/contracts/SmartWalletAbi";
+import { useTargetNetwork } from "~~/hooks/scaffold-eth";
 import scaffoldConfig from "~~/scaffold.config";
+import {
+  PendingTransaction,
+  PendingTransactionStatus,
+  SignedTransaction,
+  createPendingTransaction,
+} from "~~/types/pendingTransaction";
 import {
   StoredPasskey,
   WebAuthnAuth,
@@ -129,13 +138,9 @@ const WalletPage = () => {
   const [zoraRecipientAddress, setZoraRecipientAddress] = useState("");
   const [zoraAmount, setZoraAmount] = useState("");
 
-  // Operator management state
-  const [newOperatorAddress, setNewOperatorAddress] = useState("");
-  const [removeOperatorAddress, setRemoveOperatorAddress] = useState("");
-
-  // Check operator state
-  const [checkOperatorAddress, setCheckOperatorAddress] = useState("");
-  const [operatorCheckTriggered, setOperatorCheckTriggered] = useState(false);
+  // Check passkey state
+  const [checkPasskeyAddress, setCheckPasskeyAddress] = useState("");
+  const [passkeyCheckTriggered, setPasskeyCheckTriggered] = useState(false);
 
   // Raw TX state
   const [rawTxJson, setRawTxJson] = useState("");
@@ -149,13 +154,24 @@ const WalletPage = () => {
   const [appUrl, setAppUrl] = useState("");
   const [debouncedAppUrl] = useDebounceValue(appUrl, 500);
 
+  // AI Agent state
+  const [agentPrompt, setAgentPrompt] = useState("");
+  const [agentResponse, setAgentResponse] = useState<string | null>(null);
+  const [isAgentLoading, setIsAgentLoading] = useState(false);
+  const [agentError, setAgentError] = useState<string | null>(null);
+
+  // Pending transaction queue state (unified queue for Impersonator, WalletConnect, etc.)
+  const [pendingTransactions, setPendingTransactions] = useState<PendingTransaction[]>([]);
+  const [signedTransactions, setSignedTransactions] = useState<SignedTransaction[]>([]);
+
   // Passkey state
   const [currentPasskey, setCurrentPasskey] = useState<StoredPasskey | null>(null);
   const [isGeneratingPasskey, setIsGeneratingPasskey] = useState(false);
   const [isLoggingIn, setIsLoggingIn] = useState(false);
-  const [isAddingPasskeyOperator, setIsAddingPasskeyOperator] = useState(false);
+  const [isAddingPasskey, setIsAddingPasskey] = useState(false);
   const [passkeyError, setPasskeyError] = useState<string | null>(null);
   const [isMounted, setIsMounted] = useState(false); // Track client-side mount for hydration
+  const [showQRModal, setShowQRModal] = useState(false);
 
   // Passkey Send ETH state
   const [passkeyRecipient, setPasskeyRecipient] = useState("");
@@ -182,22 +198,6 @@ const WalletPage = () => {
   // Get the final address to use (resolved ENS or direct address)
   const finalRecipientAddress = isEnsName ? resolvedEnsAddress : recipientAddress;
 
-  // Resolve ENS for new operator
-  const isNewOperatorEns = newOperatorAddress.endsWith(".eth");
-  const { data: resolvedNewOperatorAddress } = useEnsAddress({
-    name: isNewOperatorEns ? normalize(newOperatorAddress) : undefined,
-    chainId: 1,
-  });
-  const finalNewOperatorAddress = isNewOperatorEns ? resolvedNewOperatorAddress : newOperatorAddress;
-
-  // Resolve ENS for remove operator
-  const isRemoveOperatorEns = removeOperatorAddress.endsWith(".eth");
-  const { data: resolvedRemoveOperatorAddress } = useEnsAddress({
-    name: isRemoveOperatorEns ? normalize(removeOperatorAddress) : undefined,
-    chainId: 1,
-  });
-  const finalRemoveOperatorAddress = isRemoveOperatorEns ? resolvedRemoveOperatorAddress : removeOperatorAddress;
-
   // Resolve ENS for USDC recipient
   const isUsdcRecipientEns = usdcRecipientAddress.endsWith(".eth");
   const { data: resolvedUsdcRecipientAddress } = useEnsAddress({
@@ -222,13 +222,13 @@ const WalletPage = () => {
   });
   const finalPasskeyRecipient = isPasskeyRecipientEns ? resolvedPasskeyRecipient : passkeyRecipient;
 
-  // Resolve ENS for check operator
-  const isCheckOperatorEns = checkOperatorAddress.endsWith(".eth");
-  const { data: resolvedCheckOperatorAddress } = useEnsAddress({
-    name: isCheckOperatorEns ? normalize(checkOperatorAddress) : undefined,
+  // Resolve ENS for check passkey
+  const isCheckPasskeyEns = checkPasskeyAddress.endsWith(".eth");
+  const { data: resolvedCheckPasskeyAddress } = useEnsAddress({
+    name: isCheckPasskeyEns ? normalize(checkPasskeyAddress) : undefined,
     chainId: 1,
   });
-  const finalCheckOperatorAddress = isCheckOperatorEns ? resolvedCheckOperatorAddress : checkOperatorAddress;
+  const finalCheckPasskeyAddress = isCheckPasskeyEns ? resolvedCheckPasskeyAddress : checkPasskeyAddress;
 
   // Validate address format
   const isValidAddress = walletAddress && isAddress(walletAddress);
@@ -243,32 +243,29 @@ const WalletPage = () => {
     },
   });
 
-  // Check if connected address is an operator
-  const { data: isOperator, isLoading: operatorLoading } = useReadContract({
+  // Check if connected address is a passkey (Note: connected EOA wallets aren't passkeys, only owner can exec directly)
+  const { isLoading: passkeyCheckLoading } = useReadContract({
     address: isValidAddress ? (walletAddress as `0x${string}`) : undefined,
     abi: SMART_WALLET_ABI,
-    functionName: "operators",
+    functionName: "isPasskey",
     args: connectedAddress ? [connectedAddress] : undefined,
     query: {
       enabled: !!isValidAddress && !!connectedAddress,
     },
   });
 
-  // Check if a specific address is an operator (user-triggered)
-  const { data: checkedAddressIsOperator, isLoading: checkingOperator } = useReadContract({
+  // Check if a specific address is a passkey (user-triggered)
+  const { data: checkedAddressIsPasskey, isLoading: checkingPasskey } = useReadContract({
     address: isValidAddress ? (walletAddress as `0x${string}`) : undefined,
     abi: SMART_WALLET_ABI,
-    functionName: "operators",
+    functionName: "isPasskey",
     args:
-      finalCheckOperatorAddress && isAddress(finalCheckOperatorAddress)
-        ? [finalCheckOperatorAddress as `0x${string}`]
+      finalCheckPasskeyAddress && isAddress(finalCheckPasskeyAddress)
+        ? [finalCheckPasskeyAddress as `0x${string}`]
         : undefined,
     query: {
       enabled:
-        !!isValidAddress &&
-        !!finalCheckOperatorAddress &&
-        isAddress(finalCheckOperatorAddress) &&
-        operatorCheckTriggered,
+        !!isValidAddress && !!finalCheckPasskeyAddress && isAddress(finalCheckPasskeyAddress) && passkeyCheckTriggered,
     },
   });
 
@@ -310,11 +307,14 @@ const WalletPage = () => {
   // Get wagmi config for contract reads in callbacks
   const config = useConfig();
 
-  // Check if current passkey is an operator
-  const { data: isPasskeyOperator, refetch: refetchPasskeyOperator } = useReadContract({
+  // Get target network for Address component links
+  const { targetNetwork } = useTargetNetwork();
+
+  // Check if current passkey is registered
+  const { data: isPasskeyRegistered, refetch: refetchPasskeyRegistered } = useReadContract({
     address: isValidAddress ? (walletAddress as `0x${string}`) : undefined,
     abi: SMART_WALLET_ABI,
-    functionName: "operators",
+    functionName: "isPasskey",
     args: currentPasskey ? [currentPasskey.passkeyAddress] : undefined,
     query: {
       enabled: !!isValidAddress && !!currentPasskey,
@@ -357,15 +357,14 @@ const WalletPage = () => {
     }
   }, [walletAddress, isValidAddress]);
 
-  // Determine role
+  // Determine role (only owner can exec directly, passkeys use meta transactions)
   const isOwner = connectedAddress && owner && connectedAddress.toLowerCase() === owner.toLowerCase();
-  const isLoading = ownerLoading || operatorLoading;
-  const hasPermissions = isOwner || isOperator;
+  const isLoading = ownerLoading || passkeyCheckLoading;
+  const hasPermissions = isOwner;
 
   // Write contract hooks
   const { writeContractAsync: writeExec, isPending: isTransferPending } = useWriteContract();
-  const { writeContractAsync: writeAddOperator, isPending: isAddingOperator } = useWriteContract();
-  const { writeContractAsync: writeRemoveOperator, isPending: isRemovingOperator } = useWriteContract();
+  const { writeContractAsync: writeAddPasskey } = useWriteContract();
   const { writeContractAsync: writeBatchExec, isPending: isSwapping } = useWriteContract();
 
   const handleTransferETH = async () => {
@@ -401,44 +400,6 @@ const WalletPage = () => {
       setEthAmount("");
     } catch (error) {
       console.error("Transfer failed:", error);
-    }
-  };
-
-  const handleAddOperator = async () => {
-    if (!finalNewOperatorAddress || !isAddress(finalNewOperatorAddress)) {
-      console.log("Invalid operator address:", newOperatorAddress, "->", finalNewOperatorAddress);
-      return;
-    }
-
-    try {
-      await writeAddOperator({
-        address: walletAddress as `0x${string}`,
-        abi: SMART_WALLET_ABI,
-        functionName: "addOperator",
-        args: [finalNewOperatorAddress as `0x${string}`],
-      });
-      setNewOperatorAddress("");
-    } catch (error) {
-      console.error("Add operator failed:", error);
-    }
-  };
-
-  const handleRemoveOperator = async () => {
-    if (!finalRemoveOperatorAddress || !isAddress(finalRemoveOperatorAddress)) {
-      console.log("Invalid operator address:", removeOperatorAddress, "->", finalRemoveOperatorAddress);
-      return;
-    }
-
-    try {
-      await writeRemoveOperator({
-        address: walletAddress as `0x${string}`,
-        abi: SMART_WALLET_ABI,
-        functionName: "removeOperator",
-        args: [finalRemoveOperatorAddress as `0x${string}`],
-      });
-      setRemoveOperatorAddress("");
-    } catch (error) {
-      console.error("Remove operator failed:", error);
     }
   };
 
@@ -548,7 +509,7 @@ const WalletPage = () => {
 
   // Passkey handlers
 
-  // Generate a NEW passkey and add it as operator in one flow
+  // Generate a NEW passkey and register it in one flow
   const handleGeneratePasskey = async () => {
     if (!isWebAuthnSupported()) {
       setPasskeyError("WebAuthn is not supported in this browser");
@@ -591,13 +552,13 @@ const WalletPage = () => {
     setPasskeyError(null);
 
     try {
-      // Callback to check if a candidate passkey address is an operator
+      // Callback to check if a candidate passkey address is registered
       // This enables single-signature login for registered passkeys
-      const checkIsOperator = async (passkeyAddress: `0x${string}`): Promise<boolean> => {
+      const checkIsPasskey = async (passkeyAddress: `0x${string}`): Promise<boolean> => {
         const result = await readContract(config, {
           address: walletAddress as `0x${string}`,
           abi: SMART_WALLET_ABI,
-          functionName: "operators",
+          functionName: "isPasskey",
           args: [passkeyAddress],
         });
         return result as boolean;
@@ -605,7 +566,7 @@ const WalletPage = () => {
 
       // Call get() and recover public key from signature
       // If passkey is registered, only needs 1 Touch ID; otherwise needs 2
-      const { credentialId, qx, qy, passkeyAddress } = await loginWithPasskey(checkIsOperator);
+      const { credentialId, qx, qy, passkeyAddress } = await loginWithPasskey(checkIsPasskey);
 
       // Build the stored passkey object with recovered public key
       const stored: StoredPasskey = {
@@ -619,8 +580,8 @@ const WalletPage = () => {
       savePasskeyToStorage(walletAddress, stored);
       setCurrentPasskey(stored);
 
-      // Refetch operator status for this passkey
-      await refetchPasskeyOperator();
+      // Refetch registration status for this passkey
+      await refetchPasskeyRegistered();
     } catch (error) {
       console.error("Failed to login with passkey:", error);
       setPasskeyError(error instanceof Error ? error.message : "Failed to login with passkey");
@@ -629,34 +590,34 @@ const WalletPage = () => {
     }
   };
 
-  // Add passkey as operator - includes credentialIdHash for on-chain lookup
-  const handleAddPasskeyOperator = async () => {
+  // Add passkey - includes credentialIdHash for on-chain lookup
+  const handleAddPasskey = async () => {
     if (!currentPasskey) {
-      setPasskeyError("No passkey available to add as operator");
+      setPasskeyError("No passkey available to add");
       return;
     }
 
-    setIsAddingPasskeyOperator(true);
+    setIsAddingPasskey(true);
     setPasskeyError(null);
 
     try {
       // Compute the credentialIdHash for on-chain storage
       const credentialIdHash = getCredentialIdHash(currentPasskey.credentialId);
 
-      await writeAddOperator({
+      await writeAddPasskey({
         address: walletAddress as `0x${string}`,
         abi: SMART_WALLET_ABI,
-        functionName: "addPasskeyOperator",
+        functionName: "addPasskey",
         args: [currentPasskey.qx, currentPasskey.qy, credentialIdHash],
       });
 
-      // Refetch operator status and passkeyCreated flag after adding
-      await Promise.all([refetchPasskeyOperator(), refetchPasskeyCreated()]);
+      // Refetch registration status and passkeyCreated flag after adding
+      await Promise.all([refetchPasskeyRegistered(), refetchPasskeyCreated()]);
     } catch (error) {
-      console.error("Failed to add passkey operator:", error);
-      setPasskeyError(error instanceof Error ? error.message : "Failed to add passkey operator");
+      console.error("Failed to add passkey:", error);
+      setPasskeyError(error instanceof Error ? error.message : "Failed to add passkey");
     } finally {
-      setIsAddingPasskeyOperator(false);
+      setIsAddingPasskey(false);
     }
   };
 
@@ -678,16 +639,22 @@ const WalletPage = () => {
       return;
     }
 
-    if (passkeyNonce === undefined) {
-      setPasskeyError("Could not fetch nonce");
-      return;
-    }
-
     setIsSigningWithPasskey(true);
     setPasskeyError(null);
     setSignedMetaTx(null);
 
     try {
+      // IMPORTANT: Always fetch fresh nonce directly from chain before signing
+      // This prevents stale nonce issues when signing multiple transactions in sequence
+      const freshNonce = await readContract(config, {
+        address: walletAddress as `0x${string}`,
+        abi: SMART_WALLET_ABI,
+        functionName: "nonces",
+        args: [currentPasskey.passkeyAddress],
+      });
+
+      console.log("Signing with fresh nonce:", freshNonce);
+
       const target = finalPasskeyRecipient as `0x${string}`;
       const value = parseEther(passkeyAmount);
       const data = "0x" as `0x${string}`; // Empty data for ETH transfer
@@ -700,7 +667,7 @@ const WalletPage = () => {
         target,
         value,
         data,
-        passkeyNonce,
+        freshNonce,
         deadline,
       );
 
@@ -779,6 +746,69 @@ const WalletPage = () => {
   // Clear signed meta transaction
   const handleClearSignedTx = () => {
     setSignedMetaTx(null);
+  };
+
+  // ===========================================
+  // Pending Transaction Queue Handlers
+  // ===========================================
+
+  // Add a transaction to the pending queue (called by Impersonator, WalletConnect, etc.)
+  const addPendingTransaction = (pendingTx: PendingTransaction) => {
+    setPendingTransactions(prev => [...prev, pendingTx]);
+  };
+
+  // Update the status of a pending transaction
+  const updatePendingStatus = (id: string, status: PendingTransactionStatus, error?: string) => {
+    setPendingTransactions(prev => prev.map(tx => (tx.id === id ? { ...tx, status, error: error || tx.error } : tx)));
+  };
+
+  // Remove a pending transaction
+  const removePendingTransaction = (id: string) => {
+    setPendingTransactions(prev => prev.filter(tx => tx.id !== id));
+  };
+
+  // Add a signed transaction
+  const addSignedTransaction = (signedTx: SignedTransaction) => {
+    setSignedTransactions(prev => [...prev, signedTx]);
+  };
+
+  // Remove a signed transaction
+  const removeSignedTransaction = (pendingTxId: string) => {
+    setSignedTransactions(prev => prev.filter(tx => tx.pendingTxId !== pendingTxId));
+  };
+
+  // Handler for Impersonator sendTransaction - adds to queue instead of executing
+  const handleImpersonatorTransaction = (tx: {
+    to?: string;
+    value?: string | bigint;
+    data?: string;
+  }): Promise<string> => {
+    return new Promise((resolve, reject) => {
+      try {
+        const pendingTx = createPendingTransaction(
+          "impersonator",
+          [
+            {
+              target: (tx.to || "0x0000000000000000000000000000000000000000") as `0x${string}`,
+              value: BigInt(tx.value?.toString() || "0"),
+              data: (tx.data || "0x") as `0x${string}`,
+            },
+          ],
+          {
+            appName: "Impersonator dApp",
+            appUrl: debouncedAppUrl,
+          },
+        );
+
+        addPendingTransaction(pendingTx);
+
+        // Return a placeholder hash - the actual tx will be relayed after signing
+        // This allows the dApp to continue its flow
+        resolve(`0x${"0".repeat(64)}` as `0x${string}`);
+      } catch (error) {
+        reject(error);
+      }
+    });
   };
 
   const handleSwapUSDCtoETH = async () => {
@@ -917,37 +947,28 @@ const WalletPage = () => {
     }
   };
 
-  // Execute the parsed raw transaction
-  const handleExecuteRawTx = async () => {
+  // Add the parsed raw transaction to the pending queue for passkey signing
+  const handleAddRawTxToQueue = () => {
     if (!parsedTx) return;
 
-    try {
-      if (parsedTx.isBatch) {
-        // Execute as batch
-        await writeBatchExec({
-          address: walletAddress as `0x${string}`,
-          abi: SMART_WALLET_ABI,
-          functionName: "batchExec",
-          args: [parsedTx.calls.map(c => ({ target: c.target as `0x${string}`, value: c.value, data: c.data }))],
-        });
-      } else {
-        // Execute single call
-        const call = parsedTx.calls[0];
-        await writeExec({
-          address: walletAddress as `0x${string}`,
-          abi: SMART_WALLET_ABI,
-          functionName: "exec",
-          args: [call.target as `0x${string}`, call.value, call.data],
-        });
-      }
+    const pendingTx = createPendingTransaction(
+      "manual",
+      parsedTx.calls.map(c => ({
+        target: c.target as `0x${string}`,
+        value: c.value,
+        data: c.data,
+      })),
+      {
+        appName: "Raw Transaction",
+      },
+    );
 
-      // Clear on success
-      setRawTxJson("");
-      setParsedTx(null);
-      console.log("Raw transaction executed successfully!");
-    } catch (error) {
-      console.error("Raw transaction failed:", error);
-    }
+    addPendingTransaction(pendingTx);
+
+    // Clear the form after adding to queue
+    setRawTxJson("");
+    setParsedTx(null);
+    console.log("Raw transaction added to queue for passkey signing");
   };
 
   // Clear the raw tx form
@@ -965,6 +986,56 @@ const WalletPage = () => {
     return data;
   };
 
+  // AI Agent handler
+  const handleAgentSubmit = async () => {
+    if (!agentPrompt.trim()) return;
+
+    setIsAgentLoading(true);
+    setAgentError(null);
+    setAgentResponse(null);
+
+    try {
+      const res = await fetch("/api/agent", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ prompt: agentPrompt, walletAddress }),
+      });
+
+      const data = await res.json();
+
+      if (!res.ok) {
+        throw new Error(data.error || "Agent request failed");
+      }
+
+      if (data.response) {
+        // Text response - display it
+        setAgentResponse(data.response);
+      } else if (data.calls && Array.isArray(data.calls)) {
+        // Transaction batch - parse and add to pending queue
+        const calls = data.calls.map((call: { target: string; value: string; data: string }) => ({
+          target: call.target as `0x${string}`,
+          value: BigInt(call.value || "0"),
+          data: call.data as `0x${string}`,
+        }));
+
+        const pendingTx = createPendingTransaction("manual", calls, { appName: "AI Agent" });
+        addPendingTransaction(pendingTx);
+
+        // Clear prompt on success
+        setAgentPrompt("");
+        setAgentResponse("Transaction added to queue. Sign with your passkey below.");
+      } else {
+        // Unexpected format
+        setAgentResponse(JSON.stringify(data, null, 2));
+      }
+    } catch (error) {
+      console.error("Agent error:", error);
+      setAgentError(error instanceof Error ? error.message : "Failed to get agent response");
+    } finally {
+      setIsAgentLoading(false);
+    }
+  };
+
   if (!isValidAddress) {
     return (
       <div className="flex flex-col items-center pt-10 px-4">
@@ -980,7 +1051,7 @@ const WalletPage = () => {
     <div className="flex flex-col items-center pt-10 px-4">
       <div className="max-w-2xl w-full">
         <h1 className="text-4xl font-bold text-center mb-2">
-          Smart Wallet {passkeyCreatedOnChain ? "(w/ operator)" : "(needs operator)"}
+          Smart Wallet {passkeyCreatedOnChain ? "(w/ passkey)" : "(needs passkey)"}
         </h1>
         <p className="text-center text-lg opacity-70 mb-8">View wallet details and permissions</p>
 
@@ -992,8 +1063,48 @@ const WalletPage = () => {
             {/* Wallet Address */}
             <div className="bg-base-100 rounded-xl p-4">
               <p className="text-sm font-medium opacity-60 mb-1">Wallet Address</p>
-              <Address address={walletAddress as `0x${string}`} format="long" />
+              <div className="flex items-center gap-2">
+                <Address
+                  address={walletAddress as `0x${string}`}
+                  format="long"
+                  chain={targetNetwork}
+                  blockExplorerAddressLink={
+                    targetNetwork.id === hardhat.id ? `/blockexplorer/address/${walletAddress}` : undefined
+                  }
+                />
+                <button
+                  className="btn btn-ghost btn-sm btn-circle"
+                  onClick={() => setShowQRModal(true)}
+                  title="Show QR Code"
+                >
+                  <QrCodeIcon className="h-5 w-5" />
+                </button>
+              </div>
             </div>
+
+            {/* QR Code Modal */}
+            {showQRModal && (
+              <div className="modal modal-open" onClick={() => setShowQRModal(false)}>
+                <div className="modal-box relative" onClick={e => e.stopPropagation()}>
+                  <button
+                    className="btn btn-ghost btn-sm btn-circle absolute right-3 top-3"
+                    onClick={() => setShowQRModal(false)}
+                  >
+                    ✕
+                  </button>
+                  <h3 className="font-bold text-lg mb-4">Wallet QR Code</h3>
+                  <div className="flex flex-col items-center gap-4 py-4">
+                    <QRCodeSVG value={walletAddress} size={256} />
+                    <Address
+                      address={walletAddress as `0x${string}`}
+                      format="long"
+                      disableAddressLink
+                      chain={targetNetwork}
+                    />
+                  </div>
+                </div>
+              </div>
+            )}
 
             {/* Balance */}
             <div className="bg-base-100 rounded-xl p-4">
@@ -1049,7 +1160,13 @@ const WalletPage = () => {
               {ownerLoading ? (
                 <span className="loading loading-spinner loading-sm"></span>
               ) : owner ? (
-                <Address address={owner} />
+                <Address
+                  address={owner}
+                  chain={targetNetwork}
+                  blockExplorerAddressLink={
+                    targetNetwork.id === hardhat.id ? `/blockexplorer/address/${owner}` : undefined
+                  }
+                />
               ) : (
                 <span className="opacity-60">Unable to read owner</span>
               )}
@@ -1064,7 +1181,13 @@ const WalletPage = () => {
 
             <div className="bg-base-100 rounded-xl p-4">
               <p className="text-sm font-medium opacity-60 mb-2">Connected Address</p>
-              <Address address={connectedAddress} />
+              <Address
+                address={connectedAddress}
+                chain={targetNetwork}
+                blockExplorerAddressLink={
+                  targetNetwork.id === hardhat.id ? `/blockexplorer/address/${connectedAddress}` : undefined
+                }
+              />
 
               <div className="mt-4">
                 <p className="text-sm font-medium opacity-60 mb-2">Role</p>
@@ -1074,10 +1197,8 @@ const WalletPage = () => {
                   <div className="flex gap-2">
                     {isOwner ? (
                       <span className="badge badge-primary badge-lg">Owner</span>
-                    ) : isOperator ? (
-                      <span className="badge badge-secondary badge-lg">Operator</span>
                     ) : (
-                      <span className="badge badge-ghost badge-lg">No Permissions</span>
+                      <span className="badge badge-ghost badge-lg">Viewer</span>
                     )}
                   </div>
                 )}
@@ -1090,19 +1211,19 @@ const WalletPage = () => {
           </div>
         )}
 
-        {/* Check Operator Status Section */}
+        {/* Check Passkey Status Section */}
         <div className="bg-base-200 rounded-3xl p-6 mb-8">
-          <h2 className="text-2xl font-semibold mb-4">Check Operator Status</h2>
-          <p className="text-sm opacity-60 mb-4">Check if an address is an operator for this wallet</p>
+          <h2 className="text-2xl font-semibold mb-4">Check Passkey Status</h2>
+          <p className="text-sm opacity-60 mb-4">Check if an address is a registered passkey for this wallet</p>
 
           <div className="space-y-4">
             <div className="bg-base-100 rounded-xl p-4">
               <p className="text-sm font-medium opacity-60 mb-2">Address to Check</p>
               <AddressInput
-                value={checkOperatorAddress}
+                value={checkPasskeyAddress}
                 onChange={value => {
-                  setCheckOperatorAddress(value);
-                  setOperatorCheckTriggered(false);
+                  setCheckPasskeyAddress(value);
+                  setPasskeyCheckTriggered(false);
                 }}
                 placeholder="Enter address or ENS"
               />
@@ -1110,36 +1231,44 @@ const WalletPage = () => {
 
             <button
               className="btn btn-secondary w-full"
-              onClick={() => setOperatorCheckTriggered(true)}
+              onClick={() => setPasskeyCheckTriggered(true)}
               disabled={
-                !checkOperatorAddress ||
-                !finalCheckOperatorAddress ||
-                !isAddress(finalCheckOperatorAddress) ||
-                checkingOperator
+                !checkPasskeyAddress ||
+                !finalCheckPasskeyAddress ||
+                !isAddress(finalCheckPasskeyAddress) ||
+                checkingPasskey
               }
             >
-              {checkingOperator ? (
+              {checkingPasskey ? (
                 <>
                   <span className="loading loading-spinner loading-sm"></span>
                   Checking...
                 </>
               ) : (
-                "Check Operator"
+                "Check Passkey"
               )}
             </button>
 
             {/* Result Display */}
-            {operatorCheckTriggered &&
-              finalCheckOperatorAddress &&
-              isAddress(finalCheckOperatorAddress) &&
-              !checkingOperator && (
+            {passkeyCheckTriggered &&
+              finalCheckPasskeyAddress &&
+              isAddress(finalCheckPasskeyAddress) &&
+              !checkingPasskey && (
                 <div
-                  className={`rounded-xl p-4 ${checkedAddressIsOperator ? "bg-success/10 border border-success" : "bg-error/10 border border-error"}`}
+                  className={`rounded-xl p-4 ${checkedAddressIsPasskey ? "bg-success/10 border border-success" : "bg-error/10 border border-error"}`}
                 >
                   <div className="flex items-center gap-2">
-                    <Address address={finalCheckOperatorAddress as `0x${string}`} />
-                    <span className={`badge ${checkedAddressIsOperator ? "badge-success" : "badge-error"}`}>
-                      {checkedAddressIsOperator ? "Is Operator" : "Not Operator"}
+                    <Address
+                      address={finalCheckPasskeyAddress as `0x${string}`}
+                      chain={targetNetwork}
+                      blockExplorerAddressLink={
+                        targetNetwork.id === hardhat.id
+                          ? `/blockexplorer/address/${finalCheckPasskeyAddress}`
+                          : undefined
+                      }
+                    />
+                    <span className={`badge ${checkedAddressIsPasskey ? "badge-success" : "badge-error"}`}>
+                      {checkedAddressIsPasskey ? "Registered Passkey" : "Not a Passkey"}
                     </span>
                   </div>
                 </div>
@@ -1171,8 +1300,8 @@ const WalletPage = () => {
               <div className="bg-base-100 rounded-xl p-4">
                 <div className="flex items-center justify-between mb-2">
                   <p className="text-sm font-medium opacity-60">Passkey Status</p>
-                  {isPasskeyOperator ? (
-                    <span className="badge badge-success">Active Operator</span>
+                  {isPasskeyRegistered ? (
+                    <span className="badge badge-success">Registered</span>
                   ) : (
                     <span className="badge badge-warning">Not Registered</span>
                   )}
@@ -1180,7 +1309,15 @@ const WalletPage = () => {
                 <div className="space-y-2">
                   <div>
                     <p className="text-xs opacity-60">Passkey Address</p>
-                    <Address address={currentPasskey.passkeyAddress} />
+                    <Address
+                      address={currentPasskey.passkeyAddress}
+                      chain={targetNetwork}
+                      blockExplorerAddressLink={
+                        targetNetwork.id === hardhat.id
+                          ? `/blockexplorer/address/${currentPasskey.passkeyAddress}`
+                          : undefined
+                      }
+                    />
                   </div>
                   <div>
                     <p className="text-xs opacity-60">Credential ID</p>
@@ -1191,26 +1328,22 @@ const WalletPage = () => {
 
               {/* Actions based on status */}
               <div className="space-y-2">
-                {/* Add as Operator button - only for owner, only if not already operator */}
-                {isOwner && !isPasskeyOperator && (
-                  <button
-                    className="btn btn-primary w-full"
-                    onClick={handleAddPasskeyOperator}
-                    disabled={isAddingPasskeyOperator}
-                  >
-                    {isAddingPasskeyOperator ? (
+                {/* Add Passkey button - only for owner, only if not already registered */}
+                {isOwner && !isPasskeyRegistered && (
+                  <button className="btn btn-primary w-full" onClick={handleAddPasskey} disabled={isAddingPasskey}>
+                    {isAddingPasskey ? (
                       <>
                         <span className="loading loading-spinner loading-sm"></span>
-                        Adding as Operator...
+                        Adding Passkey...
                       </>
                     ) : (
-                      "Add Passkey as Operator"
+                      "Add Passkey"
                     )}
                   </button>
                 )}
 
-                {/* If passkey is operator, show ready message */}
-                {isPasskeyOperator && (
+                {/* If passkey is registered, show ready message */}
+                {isPasskeyRegistered && (
                   <div className="bg-success/10 border border-success rounded-xl p-4 text-center">
                     <p className="text-success font-medium">Passkey is ready to sign transactions</p>
                     <p className="text-xs opacity-70 mt-1">Use the &quot;Send ETH with Passkey&quot; section below</p>
@@ -1317,8 +1450,27 @@ const WalletPage = () => {
           )}
         </div>
 
-        {/* Send ETH with Passkey Section - Only when passkey is active operator */}
-        {currentPasskey && isPasskeyOperator && (
+        {/* Pending Transaction Queue - Shows transactions from Impersonator, WalletConnect, etc. */}
+        {pendingTransactions.length > 0 && (
+          <PendingTransactionQueue
+            smartWalletAddress={walletAddress}
+            pendingTransactions={pendingTransactions}
+            signedTransactions={signedTransactions}
+            currentPasskey={currentPasskey}
+            isPasskeyRegistered={!!isPasskeyRegistered}
+            passkeyNonce={passkeyNonce}
+            onUpdatePendingStatus={updatePendingStatus}
+            onRemovePending={removePendingTransaction}
+            onAddSigned={addSignedTransaction}
+            onRemoveSigned={removeSignedTransaction}
+            refetchPasskeyNonce={async () => {
+              await refetchPasskeyNonce();
+            }}
+          />
+        )}
+
+        {/* Send ETH with Passkey Section - Only when passkey is registered */}
+        {currentPasskey && isPasskeyRegistered && (
           <div className="bg-base-200 rounded-3xl p-6 mb-8">
             <h2 className="text-2xl font-semibold mb-4">Send ETH with Passkey</h2>
             <p className="text-sm opacity-60 mb-4">
@@ -1384,7 +1536,13 @@ const WalletPage = () => {
                   <div className="space-y-2 text-sm">
                     <div className="flex justify-between">
                       <span className="opacity-60">To:</span>
-                      <Address address={signedMetaTx.target} />
+                      <Address
+                        address={signedMetaTx.target}
+                        chain={targetNetwork}
+                        blockExplorerAddressLink={
+                          targetNetwork.id === hardhat.id ? `/blockexplorer/address/${signedMetaTx.target}` : undefined
+                        }
+                      />
                     </div>
                     <div className="flex justify-between">
                       <span className="opacity-60">Amount:</span>
@@ -1473,7 +1631,7 @@ const WalletPage = () => {
           </div>
         )}
 
-        {/* Transfer ETH Section - Only for owners/operators */}
+        {/* Transfer ETH Section - Only for owners */}
         {connectedAddress && hasPermissions && !isLoading && (
           <div className="bg-base-200 rounded-3xl p-6 mb-8">
             <h2 className="text-2xl font-semibold mb-4">Transfer ETH</h2>
@@ -1532,7 +1690,7 @@ const WalletPage = () => {
           </div>
         )}
 
-        {/* Transfer USDC Section - Only for owners/operators */}
+        {/* Transfer USDC Section - Only for owners */}
         {connectedAddress && hasPermissions && !isLoading && (
           <div className="bg-base-200 rounded-3xl p-6 mb-8">
             <h2 className="text-2xl font-semibold mb-4">Transfer USDC</h2>
@@ -1591,7 +1749,7 @@ const WalletPage = () => {
           </div>
         )}
 
-        {/* Transfer ZORA Section - Only for owners/operators */}
+        {/* Transfer ZORA Section - Only for owners */}
         {connectedAddress && hasPermissions && !isLoading && (
           <div className="bg-base-200 rounded-3xl p-6">
             <h2 className="text-2xl font-semibold mb-4">Transfer ZORA</h2>
@@ -1650,7 +1808,7 @@ const WalletPage = () => {
           </div>
         )}
 
-        {/* Swap USDC to ETH Section - Only for owners/operators */}
+        {/* Swap USDC to ETH Section - Only for owners */}
         {connectedAddress && hasPermissions && !isLoading && (
           <div className="bg-base-200 rounded-3xl p-6 mt-8">
             <h2 className="text-2xl font-semibold mb-4">Swap</h2>
@@ -1693,84 +1851,76 @@ const WalletPage = () => {
           </div>
         )}
 
-        {/* Manage Operators Section - Only for owners */}
-        {connectedAddress && isOwner && !isLoading && (
+        {/* AI Agent Section - For passkey holders */}
+        {currentPasskey && isPasskeyRegistered && (
           <div className="bg-base-200 rounded-3xl p-6 mt-8">
-            <h2 className="text-2xl font-semibold mb-4">Manage Operators</h2>
-            <p className="text-sm opacity-60 mb-4">Add or remove addresses that can execute transactions</p>
+            <h2 className="text-2xl font-semibold mb-4">AI Agent</h2>
+            <p className="text-sm opacity-60 mb-4">
+              Describe what you want to do in plain English. The AI will generate the transaction for you.
+            </p>
 
-            <div className="space-y-6">
-              {/* Add Operator */}
+            <div className="space-y-4">
+              {/* Prompt Input */}
               <div className="bg-base-100 rounded-xl p-4">
-                <p className="text-sm font-medium opacity-60 mb-2">Add Operator</p>
-                <div className="space-y-3">
-                  <AddressInput
-                    value={newOperatorAddress}
-                    onChange={setNewOperatorAddress}
-                    placeholder="Enter operator address"
-                  />
-                  <button
-                    className="btn btn-success w-full"
-                    onClick={handleAddOperator}
-                    disabled={
-                      isAddingOperator ||
-                      !newOperatorAddress ||
-                      !finalNewOperatorAddress ||
-                      !isAddress(finalNewOperatorAddress)
+                <p className="text-sm font-medium opacity-60 mb-2">What do you want to do?</p>
+                <textarea
+                  className="textarea textarea-bordered w-full"
+                  rows={3}
+                  placeholder="e.g., Send all my USDC to 0x1234... or How much ETH do I have?"
+                  value={agentPrompt}
+                  onChange={e => {
+                    setAgentPrompt(e.target.value);
+                    setAgentResponse(null);
+                    setAgentError(null);
+                  }}
+                  onKeyDown={e => {
+                    if (e.key === "Enter" && !e.shiftKey) {
+                      e.preventDefault();
+                      handleAgentSubmit();
                     }
-                  >
-                    {isAddingOperator ? (
-                      <>
-                        <span className="loading loading-spinner loading-sm"></span>
-                        Adding...
-                      </>
-                    ) : (
-                      "Add Operator"
-                    )}
-                  </button>
-                </div>
+                  }}
+                />
               </div>
 
-              {/* Remove Operator */}
-              <div className="bg-base-100 rounded-xl p-4">
-                <p className="text-sm font-medium opacity-60 mb-2">Remove Operator</p>
-                <div className="space-y-3">
-                  <AddressInput
-                    value={removeOperatorAddress}
-                    onChange={setRemoveOperatorAddress}
-                    placeholder="Enter operator address"
-                  />
-                  <button
-                    className="btn btn-error w-full"
-                    onClick={handleRemoveOperator}
-                    disabled={
-                      isRemovingOperator ||
-                      !removeOperatorAddress ||
-                      !finalRemoveOperatorAddress ||
-                      !isAddress(finalRemoveOperatorAddress)
-                    }
-                  >
-                    {isRemovingOperator ? (
-                      <>
-                        <span className="loading loading-spinner loading-sm"></span>
-                        Removing...
-                      </>
-                    ) : (
-                      "Remove Operator"
-                    )}
-                  </button>
+              {/* Error Display */}
+              {agentError && (
+                <div className="bg-error/10 border border-error rounded-xl p-4">
+                  <p className="text-error text-sm">{agentError}</p>
                 </div>
-              </div>
+              )}
+
+              {/* Response Display */}
+              {agentResponse && (
+                <div className="bg-success/10 border border-success rounded-xl p-4">
+                  <p className="text-sm">{agentResponse}</p>
+                </div>
+              )}
+
+              {/* Submit Button */}
+              <button
+                className="btn btn-primary w-full"
+                onClick={handleAgentSubmit}
+                disabled={isAgentLoading || !agentPrompt.trim()}
+              >
+                {isAgentLoading ? (
+                  <>
+                    <span className="loading loading-spinner loading-sm"></span>
+                    Thinking...
+                  </>
+                ) : (
+                  "Ask AI Agent"
+                )}
+              </button>
             </div>
           </div>
         )}
 
-        {/* Raw Transaction Section - Only for owners/operators */}
-        {connectedAddress && hasPermissions && !isLoading && (
+        {/* Raw Transaction Section - For passkey holders */}
+        {currentPasskey && isPasskeyRegistered && (
           <div className="bg-base-200 rounded-3xl p-6 mt-8">
             <h2 className="text-2xl font-semibold mb-4">Raw Transaction</h2>
             <p className="text-sm opacity-60 mb-4">
-              Paste transaction JSON from GPT or other sources. Supports single calls or batch transactions.
+              Paste transaction JSON from GPT or other sources. Sign with your passkey, then anyone can relay it.
             </p>
 
             {/* Example for AI prompt */}
@@ -1943,7 +2093,13 @@ What I want to do: `);
                         {/* Target */}
                         <div>
                           <p className="text-xs opacity-60">Target</p>
-                          <Address address={call.target as `0x${string}`} />
+                          <Address
+                            address={call.target as `0x${string}`}
+                            chain={targetNetwork}
+                            blockExplorerAddressLink={
+                              targetNetwork.id === hardhat.id ? `/blockexplorer/address/${call.target}` : undefined
+                            }
+                          />
                         </div>
 
                         {/* Value */}
@@ -1969,33 +2125,25 @@ What I want to do: `);
                     </div>
                   ))}
 
-                  {/* Execute Button */}
-                  <button
-                    className="btn btn-primary w-full"
-                    onClick={handleExecuteRawTx}
-                    disabled={isTransferPending || isSwapping}
-                  >
-                    {isTransferPending || isSwapping ? (
-                      <>
-                        <span className="loading loading-spinner loading-sm"></span>
-                        Executing...
-                      </>
-                    ) : (
-                      `Execute ${parsedTx.isBatch ? "Batch" : "Transaction"}`
-                    )}
+                  {/* Add to Queue Button */}
+                  <button className="btn btn-primary w-full" onClick={handleAddRawTxToQueue}>
+                    Add to Pending Queue (Sign with Passkey)
                   </button>
+                  <p className="text-xs text-center opacity-60">
+                    Sign with your passkey, then anyone can relay the transaction
+                  </p>
                 </div>
               )}
             </div>
           </div>
         )}
 
-        {/* WalletConnect Section - Only for owners/operators */}
+        {/* WalletConnect Section - Only for owners */}
         {connectedAddress && hasPermissions && !isLoading && (
           <WalletConnectSection
             smartWalletAddress={walletAddress}
             currentPasskey={currentPasskey}
-            isPasskeyOperator={!!isPasskeyOperator}
+            isPasskeyOperator={!!isPasskeyRegistered}
             passkeyNonce={passkeyNonce}
             refetchPasskeyNonce={async () => {
               await refetchPasskeyNonce();
@@ -2004,14 +2152,28 @@ What I want to do: `);
         )}
       </div>
 
-      {/* Impersonator Section - Only for owners/operators (full width) */}
-      {connectedAddress && hasPermissions && !isLoading && (
+      {/* Impersonator Section - Available when passkey is registered (full width) */}
+      {isValidAddress && (
         <div className="w-full max-w-7xl px-4 mt-8">
           <div className="bg-base-200 rounded-3xl p-6">
             <h2 className="text-2xl font-semibold mb-4">Impersonate at dApp</h2>
             <p className="text-sm opacity-60 mb-4">
-              Enter a dApp URL to interact with it as this smart wallet on Base network
+              Enter a dApp URL to interact with it as this smart wallet on Base network. Transactions will be queued for
+              passkey signing.
             </p>
+
+            {/* Passkey requirement notice */}
+            {!currentPasskey && (
+              <div className="bg-warning/10 border border-warning rounded-xl p-4 mb-4">
+                <p className="text-warning text-sm">Login with a passkey above to sign transactions from dApps</p>
+              </div>
+            )}
+
+            {!isPasskeyRegistered && currentPasskey && (
+              <div className="bg-warning/10 border border-warning rounded-xl p-4 mb-4">
+                <p className="text-warning text-sm">Add your passkey to this wallet above to sign transactions</p>
+              </div>
+            )}
 
             <div className="space-y-4">
               {/* URL Input */}
@@ -2032,19 +2194,7 @@ What I want to do: `);
                   <ImpersonatorIframeProvider
                     address={walletAddress}
                     rpcUrl={BASE_RPC_URL}
-                    sendTransaction={async tx => {
-                      const hash = await writeExec({
-                        address: walletAddress as `0x${string}`,
-                        abi: SMART_WALLET_ABI,
-                        functionName: "exec",
-                        args: [
-                          (tx.to || "0x0000000000000000000000000000000000000000") as `0x${string}`,
-                          BigInt(tx.value?.toString() || "0"),
-                          (tx.data || "0x") as `0x${string}`,
-                        ],
-                      });
-                      return hash;
-                    }}
+                    sendTransaction={handleImpersonatorTransaction}
                   >
                     <ImpersonatorIframe
                       key={debouncedAppUrl + walletAddress}

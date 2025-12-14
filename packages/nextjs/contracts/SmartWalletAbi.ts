@@ -15,14 +15,7 @@ export const SMART_WALLET_ABI = [
   },
   {
     type: "function",
-    name: "addOperator",
-    inputs: [{ name: "operator", type: "address" }],
-    outputs: [],
-    stateMutability: "nonpayable",
-  },
-  {
-    type: "function",
-    name: "addPasskeyOperator",
+    name: "addPasskey",
     inputs: [
       { name: "qx", type: "bytes32" },
       { name: "qy", type: "bytes32" },
@@ -33,7 +26,7 @@ export const SMART_WALLET_ABI = [
   },
   {
     type: "function",
-    name: "removePasskeyOperator",
+    name: "removePasskey",
     inputs: [
       { name: "qx", type: "bytes32" },
       { name: "qy", type: "bytes32" },
@@ -202,24 +195,10 @@ export const SMART_WALLET_ABI = [
   },
   {
     type: "function",
-    name: "operators",
-    inputs: [{ name: "", type: "address" }],
-    outputs: [{ name: "", type: "bool" }],
-    stateMutability: "view",
-  },
-  {
-    type: "function",
     name: "owner",
     inputs: [],
     outputs: [{ name: "", type: "address" }],
     stateMutability: "view",
-  },
-  {
-    type: "function",
-    name: "removeOperator",
-    inputs: [{ name: "operator", type: "address" }],
-    outputs: [],
-    stateMutability: "nonpayable",
   },
   {
     type: "function",
@@ -285,19 +264,7 @@ export const SMART_WALLET_ABI = [
   },
   {
     type: "event",
-    name: "OperatorAdded",
-    inputs: [{ name: "operator", type: "address", indexed: true }],
-    anonymous: false,
-  },
-  {
-    type: "event",
-    name: "OperatorRemoved",
-    inputs: [{ name: "operator", type: "address", indexed: true }],
-    anonymous: false,
-  },
-  {
-    type: "event",
-    name: "PasskeyOperatorAdded",
+    name: "PasskeyAdded",
     inputs: [
       { name: "passkeyAddress", type: "address", indexed: true },
       { name: "qx", type: "bytes32", indexed: false },
@@ -307,7 +274,7 @@ export const SMART_WALLET_ABI = [
   },
   {
     type: "event",
-    name: "PasskeyOperatorRemoved",
+    name: "PasskeyRemoved",
     inputs: [{ name: "passkeyAddress", type: "address", indexed: true }],
     anonymous: false,
   },
@@ -315,7 +282,7 @@ export const SMART_WALLET_ABI = [
     type: "event",
     name: "MetaExecuted",
     inputs: [
-      { name: "operator", type: "address", indexed: true },
+      { name: "passkey", type: "address", indexed: true },
       { name: "target", type: "address", indexed: true },
       { name: "value", type: "uint256", indexed: false },
       { name: "data", type: "bytes", indexed: false },
@@ -353,7 +320,6 @@ export const SMART_WALLET_ABI = [
   { type: "error", name: "ExecutionFailed", inputs: [] },
   { type: "error", name: "InvalidSignature", inputs: [] },
   { type: "error", name: "ExpiredSignature", inputs: [] },
-  { type: "error", name: "NotOperator", inputs: [] },
   { type: "error", name: "PasskeyAlreadyRegistered", inputs: [] },
   { type: "error", name: "PasskeyNotRegistered", inputs: [] },
   { type: "error", name: "NotAuthorized", inputs: [] },

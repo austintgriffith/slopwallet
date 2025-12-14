@@ -31,11 +31,11 @@ const SUPPORTED_METHODS = [
   // Compatibility - return wallet address
   "eth_accounts",
   "eth_requestAccounts",
-  // Signing methods - DISABLED FOR TESTING
-  // "personal_sign",
-  // "eth_sign",
-  // "eth_signTypedData",
-  // "eth_signTypedData_v4",
+  // Signing methods - required for dApps like CoW Swap
+  "personal_sign",
+  "eth_sign",
+  "eth_signTypedData",
+  "eth_signTypedData_v4",
 ];
 
 // Supported events

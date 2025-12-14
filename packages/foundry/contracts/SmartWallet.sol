@@ -21,13 +21,11 @@ contract SmartWallet is Ownable, IERC1271, Initializable {
         bytes data;
     }
 
-    mapping(address => bool) public operators;
-
-    // Nonce for replay protection (keyed by operator/passkey address)
+    // Nonce for replay protection (keyed by passkey address)
     mapping(address => uint256) public nonces;
 
     // Passkey public key storage (keyed by derived address)
-    // If passkeyQx[addr] != 0, then addr is a passkey operator
+    // If passkeyQx[addr] != 0, then addr is a registered passkey
     mapping(address => bytes32) public passkeyQx;
     mapping(address => bytes32) public passkeyQy;
 
@@ -38,20 +36,16 @@ contract SmartWallet is Ownable, IERC1271, Initializable {
     mapping(bytes32 => address) public credentialIdToAddress;
 
     event Executed(address indexed target, uint256 value, bytes data);
-    event OperatorAdded(address indexed operator);
-    event OperatorRemoved(address indexed operator);
-    event PasskeyOperatorAdded(address indexed passkeyAddress, bytes32 qx, bytes32 qy);
-    event PasskeyOperatorRemoved(address indexed passkeyAddress);
-    event MetaExecuted(address indexed operator, address indexed target, uint256 value, bytes data);
+    event PasskeyAdded(address indexed passkeyAddress, bytes32 qx, bytes32 qy);
+    event PasskeyRemoved(address indexed passkeyAddress);
+    event MetaExecuted(address indexed passkey, address indexed target, uint256 value, bytes data);
 
     error NotAuthorized();
     error ExecutionFailed();
     error InvalidSignature();
     error ExpiredSignature();
-    error NotOperator();
     error PasskeyAlreadyRegistered();
     error PasskeyNotRegistered();
-    // error UseMetaExecPasskey(); // Only needed for EOA metaExec
 
     /// @custom:oz-upgrades-unsafe-allow constructor
     constructor() Ownable(address(1)) {
@@ -66,29 +60,6 @@ contract SmartWallet is Ownable, IERC1271, Initializable {
         _transferOwnership(_owner);
     }
 
-    modifier onlyOwnerOrOperator() {
-        if (msg.sender != owner() && !operators[msg.sender]) revert NotAuthorized();
-        _;
-    }
-
-    /**
-     * @notice Add an operator who can execute calls
-     * @param operator The address to add as operator
-     */
-    function addOperator(address operator) external onlyOwner {
-        operators[operator] = true;
-        emit OperatorAdded(operator);
-    }
-
-    /**
-     * @notice Remove an operator
-     * @param operator The address to remove as operator
-     */
-    function removeOperator(address operator) external onlyOwner {
-        operators[operator] = false;
-        emit OperatorRemoved(operator);
-    }
-
     /**
      * @notice Derive a deterministic address from passkey public key coordinates
      * @param qx The x-coordinate of the passkey public key
@@ -100,17 +71,15 @@ contract SmartWallet is Ownable, IERC1271, Initializable {
     }
 
     /**
-     * @notice Add a passkey as an operator
+     * @notice Add a passkey
      * @param qx The x-coordinate of the passkey public key
      * @param qy The y-coordinate of the passkey public key
      * @param credentialIdHash The keccak256 hash of the WebAuthn credentialId for login lookup
      */
-    function addPasskeyOperator(bytes32 qx, bytes32 qy, bytes32 credentialIdHash) external onlyOwner {
+    function addPasskey(bytes32 qx, bytes32 qy, bytes32 credentialIdHash) external onlyOwner {
         address passkeyAddr = getPasskeyAddress(qx, qy);
         if (passkeyQx[passkeyAddr] != bytes32(0)) revert PasskeyAlreadyRegistered();
 
-        // All in one atomic operation
-        operators[passkeyAddr] = true;
         passkeyQx[passkeyAddr] = qx;
         passkeyQy[passkeyAddr] = qy;
         credentialIdToAddress[credentialIdHash] = passkeyAddr;
@@ -120,29 +89,28 @@ contract SmartWallet is Ownable, IERC1271, Initializable {
             passkeyCreated = true;
         }
 
-        emit PasskeyOperatorAdded(passkeyAddr, qx, qy);
+        emit PasskeyAdded(passkeyAddr, qx, qy);
     }
 
     /**
-     * @notice Remove a passkey operator
+     * @notice Remove a passkey
      * @param qx The x-coordinate of the passkey public key
      * @param qy The y-coordinate of the passkey public key
      */
-    function removePasskeyOperator(bytes32 qx, bytes32 qy) external onlyOwner {
+    function removePasskey(bytes32 qx, bytes32 qy) external onlyOwner {
         address passkeyAddr = getPasskeyAddress(qx, qy);
         if (passkeyQx[passkeyAddr] == bytes32(0)) revert PasskeyNotRegistered();
 
-        operators[passkeyAddr] = false;
         delete passkeyQx[passkeyAddr];
         delete passkeyQy[passkeyAddr];
 
-        emit PasskeyOperatorRemoved(passkeyAddr);
+        emit PasskeyRemoved(passkeyAddr);
     }
 
     /**
-     * @notice Check if an address is a passkey operator
+     * @notice Check if an address is a registered passkey
      * @param addr The address to check
-     * @return True if the address is a passkey operator
+     * @return True if the address is a registered passkey
      */
     function isPasskey(address addr) public view returns (bool) {
         return passkeyQx[addr] != bytes32(0);
@@ -150,7 +118,6 @@ contract SmartWallet is Ownable, IERC1271, Initializable {
 
     /**
      * @notice Get passkey info by credentialId hash (for login flow)
-     * @dev If credentialId exists, passkey is an operator (credentialId only written during addPasskeyOperator)
      * @param credentialIdHash The keccak256 hash of the WebAuthn credentialId
      * @return passkeyAddr The derived passkey address (address(0) if not registered)
      * @return qx The x-coordinate of the passkey public key
@@ -178,7 +145,7 @@ contract SmartWallet is Ownable, IERC1271, Initializable {
      */
     function exec(address target, uint256 value, bytes calldata data) 
         external 
-        onlyOwnerOrOperator 
+        onlyOwner 
         returns (bytes memory result) 
     {
         (bool success, bytes memory returnData) = target.call{value: value}(data);
@@ -195,7 +162,7 @@ contract SmartWallet is Ownable, IERC1271, Initializable {
      */
     function batchExec(Call[] calldata calls) 
         external 
-        onlyOwnerOrOperator 
+        onlyOwner 
         returns (bytes[] memory results) 
     {
         results = new bytes[](calls.length);
@@ -307,7 +274,7 @@ contract SmartWallet is Ownable, IERC1271, Initializable {
 
     /**
      * @notice Execute a call via passkey meta transaction (R1/WebAuthn signature)
-     * @dev Anyone can relay this transaction on behalf of a passkey operator
+     * @dev Anyone can relay this transaction on behalf of a registered passkey
      * @param target The address to call
      * @param value The ETH value to send
      * @param data The calldata to send
@@ -329,9 +296,8 @@ contract SmartWallet is Ownable, IERC1271, Initializable {
         // Check signature hasn't expired
         if (block.timestamp > deadline) revert ExpiredSignature();
 
-        // Derive the passkey address and verify it's a registered operator
+        // Derive the passkey address and verify it's registered
         address passkeyAddr = getPasskeyAddress(qx, qy);
-        if (!operators[passkeyAddr]) revert NotOperator();
         if (passkeyQx[passkeyAddr] != qx || passkeyQy[passkeyAddr] != qy) revert PasskeyNotRegistered();
 
         // Build the challenge that was signed (includes chainId for cross-chain replay protection)
@@ -361,7 +327,7 @@ contract SmartWallet is Ownable, IERC1271, Initializable {
 
     /**
      * @notice Execute multiple calls via passkey meta transaction (R1/WebAuthn signature)
-     * @dev Anyone can relay this transaction on behalf of a passkey operator
+     * @dev Anyone can relay this transaction on behalf of a registered passkey
      * @param calls Array of calls to execute
      * @param qx The x-coordinate of the passkey public key
      * @param qy The y-coordinate of the passkey public key
@@ -379,9 +345,8 @@ contract SmartWallet is Ownable, IERC1271, Initializable {
         // Check signature hasn't expired
         if (block.timestamp > deadline) revert ExpiredSignature();
 
-        // Derive the passkey address and verify it's a registered operator
+        // Derive the passkey address and verify it's registered
         address passkeyAddr = getPasskeyAddress(qx, qy);
-        if (!operators[passkeyAddr]) revert NotOperator();
         if (passkeyQx[passkeyAddr] != qx || passkeyQy[passkeyAddr] != qy) revert PasskeyNotRegistered();
 
         // Build the challenge that was signed (includes chainId for cross-chain replay protection)
@@ -411,8 +376,8 @@ contract SmartWallet is Ownable, IERC1271, Initializable {
 
     /**
      * @notice ERC-1271 signature validation (ECDSA only)
-     * @dev Validates that the signature was created by the owner or an EOA operator.
-     *      Passkey operators cannot use this function - they should use metaExecPasskey instead.
+     * @dev Validates that the signature was created by the owner.
+     *      Passkeys use WebAuthn signatures and should use metaExecPasskey instead.
      * @param hash The hash of the data that was signed
      * @param signature The signature bytes (ECDSA signature)
      * @return magicValue The magic value 0x1626ba7e if valid, 0xffffffff otherwise
@@ -425,8 +390,8 @@ contract SmartWallet is Ownable, IERC1271, Initializable {
         // Recover the signer from the signature
         address signer = ECDSA.recover(hash, signature);
         
-        // Check if signer is owner or EOA operator (not a passkey)
-        if (signer == owner() || (operators[signer] && !isPasskey(signer))) {
+        // Check if signer is owner
+        if (signer == owner()) {
             return IERC1271.isValidSignature.selector; // 0x1626ba7e
         }
         

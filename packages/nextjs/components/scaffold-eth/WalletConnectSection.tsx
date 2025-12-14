@@ -3,8 +3,9 @@
 import { useState } from "react";
 import Image from "next/image";
 import { Address } from "@scaffold-ui/components";
-import { formatEther } from "viem";
-import { useAccount, useChainId, usePublicClient, useWalletClient, useWriteContract } from "wagmi";
+import { formatEther, toHex } from "viem";
+import { useAccount, useChainId, useConfig, usePublicClient, useWalletClient, useWriteContract } from "wagmi";
+import { readContract, simulateContract } from "wagmi/actions";
 import { QrScannerModal } from "~~/components/scaffold-eth/QrScannerModal";
 import { SMART_WALLET_ABI } from "~~/contracts/SmartWalletAbi";
 import {
@@ -250,7 +251,8 @@ const SessionRequestCard = ({
   updateBatchStatus,
   currentPasskey,
   isPasskeyOperator,
-  passkeyNonce,
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  passkeyNonce, // Unused - we fetch fresh nonce before each signing
   refetchPasskeyNonce,
   chainId,
 }: {
@@ -272,6 +274,7 @@ const SessionRequestCard = ({
   const [signedMetaTx, setSignedMetaTx] = useState<SignedMetaTx | null>(null);
   const [isRelaying, setIsRelaying] = useState(false);
 
+  const config = useConfig();
   const { writeContractAsync } = useWriteContract();
   const publicClient = usePublicClient();
   const { address: connectedAddress } = useAccount();
@@ -426,8 +429,8 @@ const SessionRequestCard = ({
 
   // Sign transaction with passkey
   const handleSignWithPasskey = async () => {
-    if (!currentPasskey || passkeyNonce === undefined) {
-      setTxError("Passkey not available or nonce not loaded");
+    if (!currentPasskey) {
+      setTxError("Passkey not available");
       return;
     }
 
@@ -436,6 +439,42 @@ const SessionRequestCard = ({
     setSignedMetaTx(null);
 
     try {
+      // Generate unique signing ID to trace signing → relay
+      const signingId = `sign-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+      console.log("=== SIGNING STARTED ===", signingId);
+
+      // Parse the actual chain ID from the WalletConnect request
+      // Format is "eip155:8453" -> extract 8453
+      let requestChainId = chainId; // fallback to wallet's chain
+      if (request.chainId) {
+        const chainIdMatch = request.chainId.match(/eip155:(\d+)/);
+        if (chainIdMatch) {
+          requestChainId = parseInt(chainIdMatch[1], 10);
+        } else if (!isNaN(Number(request.chainId))) {
+          requestChainId = Number(request.chainId);
+        }
+      }
+
+      console.log("=== PASSKEY SIGNING DEBUG ===");
+      console.log("Chain ID (from useChainId):", chainId);
+      console.log("Request Chain ID (from WC request):", request.chainId);
+      console.log("Parsed Request Chain ID:", requestChainId);
+      console.log("Smart Wallet Address:", smartWalletAddress);
+      console.log("Passkey Address:", currentPasskey.passkeyAddress);
+      console.log("Is Batch?:", isBatchCall);
+
+      // IMPORTANT: Always fetch fresh nonce directly from chain before signing
+      // Use the REQUEST's chain ID, not the wallet's chain ID!
+      const freshNonce = await readContract(config, {
+        address: smartWalletAddress as `0x${string}`,
+        abi: SMART_WALLET_ABI,
+        functionName: "nonces",
+        args: [currentPasskey.passkeyAddress],
+        chainId: requestChainId, // Explicitly specify the chain!
+      });
+
+      console.log("Fresh nonce from chain:", freshNonce);
+
       const deadline = BigInt(Math.floor(Date.now() / 1000) + 3600); // 1 hour from now
 
       if (isBatchCall && request.calls && request.calls.length > 0) {
@@ -446,12 +485,12 @@ const SessionRequestCard = ({
           data: (call.data || "0x") as `0x${string}`,
         }));
 
-        // Build the challenge hash for batch
+        // Build the challenge hash for batch - use the REQUEST's chain ID!
         const challengeHash = buildBatchChallengeHash(
-          BigInt(chainId),
+          BigInt(requestChainId),
           smartWalletAddress as `0x${string}`,
           calls,
-          passkeyNonce,
+          freshNonce,
           deadline,
         );
 
@@ -477,16 +516,47 @@ const SessionRequestCard = ({
         const value = request.params.value ? BigInt(request.params.value) : 0n;
         const data = (request.params.data || "0x") as `0x${string}`;
 
-        // Build the challenge hash for single tx
+        console.log("=== CHALLENGE HASH INPUTS ===");
+        console.log("chainId:", requestChainId);
+        console.log("walletAddress:", smartWalletAddress);
+        console.log("target:", target);
+        console.log("value:", value.toString());
+        console.log("data length:", data.length);
+        console.log(
+          "data hash:",
+          data
+            ? `0x${Array.from(new TextEncoder().encode(data))
+                .reduce((a, b) => a + b, 0)
+                .toString(16)}`
+            : "empty",
+        );
+        console.log("nonce:", freshNonce.toString());
+        console.log("deadline:", deadline.toString());
+        console.log("request.id:", request.id);
+        console.log("request.timestamp:", request.timestamp);
+
+        // Log hex values for debugging (matches contract's abi.encodePacked format)
+        console.log("=== RAW CHALLENGE HEX INPUTS ===");
+        console.log("chainId hex (32 bytes):", toHex(BigInt(requestChainId), { size: 32 }));
+        console.log("wallet (20 bytes):", smartWalletAddress);
+        console.log("target (20 bytes):", target);
+        console.log("value hex (32 bytes):", toHex(value, { size: 32 }));
+        console.log("data (raw):", data);
+        console.log("nonce hex (32 bytes):", toHex(freshNonce, { size: 32 }));
+        console.log("deadline hex (32 bytes):", toHex(deadline, { size: 32 }));
+
+        // Build the challenge hash for single tx - use the REQUEST's chain ID!
         const challengeHash = buildChallengeHash(
-          BigInt(chainId),
+          BigInt(requestChainId),
           smartWalletAddress as `0x${string}`,
           target,
           value,
           data,
-          passkeyNonce,
+          freshNonce,
           deadline,
         );
+
+        console.log("Challenge hash:", challengeHash);
 
         // Convert hash to Uint8Array for WebAuthn
         const challengeBytes = new Uint8Array(
@@ -529,6 +599,45 @@ const SessionRequestCard = ({
       let txHash: string;
 
       if (signedMetaTx.isBatch && signedMetaTx.calls) {
+        // Pre-relay simulation for batch transaction
+        console.log("=== PRE-RELAY BATCH SIMULATION ===");
+        try {
+          await simulateContract(config, {
+            address: smartWalletAddress as `0x${string}`,
+            abi: SMART_WALLET_ABI,
+            functionName: "metaBatchExecPasskey",
+            args: [
+              signedMetaTx.calls,
+              signedMetaTx.qx,
+              signedMetaTx.qy,
+              signedMetaTx.deadline,
+              {
+                r: signedMetaTx.auth.r,
+                s: signedMetaTx.auth.s,
+                challengeIndex: signedMetaTx.auth.challengeIndex,
+                typeIndex: signedMetaTx.auth.typeIndex,
+                authenticatorData: signedMetaTx.auth.authenticatorData,
+                clientDataJSON: signedMetaTx.auth.clientDataJSON,
+              },
+            ],
+          });
+          console.log("✅ Batch simulation PASSED - transaction should succeed");
+        } catch (simError) {
+          console.error("❌ BATCH SIMULATION FAILED - Actual revert reason:");
+          const simErrorMsg = simError instanceof Error ? simError.message : String(simError);
+          if (simErrorMsg.includes("InvalidSignature")) {
+            console.error(">>> INVALID SIGNATURE - Challenge hash or WebAuthn verification failed!");
+          } else if (simErrorMsg.includes("ExecutionFailed")) {
+            console.error(">>> EXECUTION FAILED - One of the calls reverted!");
+          } else if (simErrorMsg.includes("ExpiredSignature")) {
+            console.error(">>> EXPIRED SIGNATURE - Our deadline passed!");
+          } else if (simErrorMsg.includes("PasskeyNotRegistered")) {
+            console.error(">>> PASSKEY NOT REGISTERED - The passkey is not registered on the wallet!");
+          } else {
+            console.error(">>> Unknown error:", simErrorMsg);
+          }
+        }
+
         // Relay batch transaction via metaBatchExecPasskey
         txHash = await writeContractAsync({
           address: smartWalletAddress as `0x${string}`,
@@ -551,6 +660,71 @@ const SessionRequestCard = ({
         });
       } else {
         // Relay single transaction via metaExecPasskey
+        console.log("=== RELAY DEBUG ===");
+        console.log("request.id being relayed:", request.id);
+        console.log("request.timestamp:", request.timestamp);
+        console.log("target:", signedMetaTx.target);
+        console.log("value:", signedMetaTx.value?.toString());
+        console.log("data length:", signedMetaTx.data?.length);
+        console.log(
+          "data hash:",
+          signedMetaTx.data
+            ? `0x${Array.from(new TextEncoder().encode(signedMetaTx.data))
+                .reduce((a, b) => a + b, 0)
+                .toString(16)}`
+            : "empty",
+        );
+        console.log("qx:", signedMetaTx.qx);
+        console.log("qy:", signedMetaTx.qy);
+        console.log("deadline:", signedMetaTx.deadline.toString());
+        console.log("auth.r:", signedMetaTx.auth.r);
+        console.log("auth.s:", signedMetaTx.auth.s);
+        console.log("auth.challengeIndex:", signedMetaTx.auth.challengeIndex.toString());
+        console.log("auth.typeIndex:", signedMetaTx.auth.typeIndex.toString());
+        console.log("clientDataJSON challenge:", JSON.parse(signedMetaTx.auth.clientDataJSON).challenge);
+
+        // Pre-relay simulation to get actual revert reason (not masked by wallet)
+        console.log("=== PRE-RELAY SIMULATION ===");
+        try {
+          await simulateContract(config, {
+            address: smartWalletAddress as `0x${string}`,
+            abi: SMART_WALLET_ABI,
+            functionName: "metaExecPasskey",
+            args: [
+              signedMetaTx.target!,
+              signedMetaTx.value!,
+              signedMetaTx.data!,
+              signedMetaTx.qx,
+              signedMetaTx.qy,
+              signedMetaTx.deadline,
+              {
+                r: signedMetaTx.auth.r,
+                s: signedMetaTx.auth.s,
+                challengeIndex: signedMetaTx.auth.challengeIndex,
+                typeIndex: signedMetaTx.auth.typeIndex,
+                authenticatorData: signedMetaTx.auth.authenticatorData,
+                clientDataJSON: signedMetaTx.auth.clientDataJSON,
+              },
+            ],
+          });
+          console.log("✅ Simulation PASSED - transaction should succeed");
+        } catch (simError) {
+          console.error("❌ SIMULATION FAILED - Actual revert reason:");
+          const simErrorMsg = simError instanceof Error ? simError.message : String(simError);
+          if (simErrorMsg.includes("InvalidSignature")) {
+            console.error(">>> INVALID SIGNATURE - Challenge hash or WebAuthn verification failed!");
+          } else if (simErrorMsg.includes("ExecutionFailed")) {
+            console.error(">>> EXECUTION FAILED - The Uniswap swap reverted (price/slippage/deadline)!");
+          } else if (simErrorMsg.includes("ExpiredSignature")) {
+            console.error(">>> EXPIRED SIGNATURE - Our deadline passed!");
+          } else if (simErrorMsg.includes("PasskeyNotRegistered")) {
+            console.error(">>> PASSKEY NOT REGISTERED - The passkey is not registered on the wallet!");
+          } else {
+            console.error(">>> Unknown error:", simErrorMsg);
+          }
+          // Don't throw - let the actual writeContract handle the error for the UI
+        }
+
         txHash = await writeContractAsync({
           address: smartWalletAddress as `0x${string}`,
           abi: SMART_WALLET_ABI,
@@ -626,15 +800,40 @@ const SessionRequestCard = ({
         setSignedMetaTx(null);
         onClear();
       } else {
-        // For regular eth_sendTransaction, send the transaction hash back to the dApp
+        // For regular eth_sendTransaction, wait for receipt THEN send response
+        // This ensures nonce is incremented on-chain before we proceed
+        if (publicClient) {
+          console.log("Waiting for transaction receipt...");
+          await publicClient.waitForTransactionReceipt({
+            hash: txHash as `0x${string}`,
+          });
+          console.log("Transaction confirmed!");
+        }
+
         await onApprove(request.id, request.topic, txHash);
         setSignedMetaTx(null);
       }
 
       // Refetch nonce for next transaction
       await refetchPasskeyNonce();
+      console.log("Nonce refetched after successful relay");
     } catch (err) {
-      console.error("Failed to relay transaction:", err);
+      console.error("=== RELAY FAILED ===");
+      console.error("Error:", err);
+      console.error("Error message:", err instanceof Error ? err.message : "Unknown error");
+
+      // Try to extract revert reason if available
+      const errorMessage = err instanceof Error ? err.message : String(err);
+      const isInvalidSignature = errorMessage.includes("InvalidSignature");
+      const isExecutionFailed = errorMessage.includes("ExecutionFailed");
+
+      if (isInvalidSignature) {
+        console.error(">>> INVALID SIGNATURE - Nonce or challenge hash mismatch!");
+      } else if (isExecutionFailed) {
+        console.error(">>> EXECUTION FAILED - The underlying call (e.g., Uniswap swap) reverted!");
+        console.error(">>> This could be: slippage, deadline expired, insufficient balance, etc.");
+      }
+
       setTxError(err instanceof Error ? err.message : "Failed to relay transaction");
 
       if (isBatchCall && request.batchId) {
@@ -848,7 +1047,7 @@ const SessionRequestCard = ({
               <button
                 className="btn btn-secondary w-full"
                 onClick={handleSignWithPasskey}
-                disabled={isSigningWithPasskey || isExecuting || passkeyNonce === undefined}
+                disabled={isSigningWithPasskey || isExecuting}
               >
                 {isSigningWithPasskey ? (
                   <>

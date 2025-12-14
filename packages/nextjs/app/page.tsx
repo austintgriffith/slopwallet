@@ -4,11 +4,18 @@ import { useState } from "react";
 import Link from "next/link";
 import { Address, AddressInput } from "@scaffold-ui/components";
 import type { NextPage } from "next";
+import { hardhat } from "viem/chains";
 import { useAccount } from "wagmi";
-import { useScaffoldEventHistory, useScaffoldReadContract, useScaffoldWriteContract } from "~~/hooks/scaffold-eth";
+import {
+  useScaffoldEventHistory,
+  useScaffoldReadContract,
+  useScaffoldWriteContract,
+  useTargetNetwork,
+} from "~~/hooks/scaffold-eth";
 
 const Home: NextPage = () => {
   const { address: connectedAddress } = useAccount();
+  const { targetNetwork } = useTargetNetwork();
   const [ownerAddress, setOwnerAddress] = useState<string>("");
   const [salt, setSalt] = useState<string>("0");
   const [predictedAddress, setPredictedAddress] = useState<string>("");
@@ -96,7 +103,13 @@ const Home: NextPage = () => {
             {predictedAddress && (
               <div className="bg-base-100 rounded-xl p-4">
                 <p className="text-sm font-medium mb-2">Predicted Wallet Address:</p>
-                <Address address={predictedAddress as `0x${string}`} />
+                <Address
+                  address={predictedAddress as `0x${string}`}
+                  chain={targetNetwork}
+                  blockExplorerAddressLink={
+                    targetNetwork.id === hardhat.id ? `/blockexplorer/address/${predictedAddress}` : undefined
+                  }
+                />
               </div>
             )}
           </div>
@@ -106,7 +119,13 @@ const Home: NextPage = () => {
         {connectedAddress && (
           <div className="bg-base-200 rounded-3xl p-6 mb-8">
             <h2 className="text-xl font-semibold mb-2">Your Connected Address</h2>
-            <Address address={connectedAddress} />
+            <Address
+              address={connectedAddress}
+              chain={targetNetwork}
+              blockExplorerAddressLink={
+                targetNetwork.id === hardhat.id ? `/blockexplorer/address/${connectedAddress}` : undefined
+              }
+            />
             <button className="btn btn-sm btn-outline mt-3" onClick={() => setOwnerAddress(connectedAddress)}>
               Use as Owner
             </button>
@@ -131,11 +150,23 @@ const Home: NextPage = () => {
                 >
                   <div>
                     <p className="text-sm opacity-60">Owner</p>
-                    <Address address={event.args.owner} />
+                    <Address
+                      address={event.args.owner}
+                      chain={targetNetwork}
+                      blockExplorerAddressLink={
+                        targetNetwork.id === hardhat.id ? `/blockexplorer/address/${event.args.owner}` : undefined
+                      }
+                    />
                   </div>
                   <div>
                     <p className="text-sm opacity-60">Wallet</p>
-                    <Address address={event.args.wallet} />
+                    <Address
+                      address={event.args.wallet}
+                      chain={targetNetwork}
+                      blockExplorerAddressLink={
+                        targetNetwork.id === hardhat.id ? `/blockexplorer/address/${event.args.wallet}` : undefined
+                      }
+                    />
                   </div>
                 </Link>
               ))}

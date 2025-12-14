@@ -8,6 +8,7 @@
     ]
   },
   "scripts": {
+    "agent": "yarn workspace @se-2/agent start",
     "account": "yarn foundry:account",
     "account:generate": "yarn foundry:generate",
     "account:import": "yarn foundry:account-import",

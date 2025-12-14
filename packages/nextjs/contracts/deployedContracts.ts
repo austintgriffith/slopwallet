@@ -7,7 +7,7 @@ import { GenericContractsDeclaration } from "~~/utils/scaffold-eth/contract";
 const deployedContracts = {
   8453: {
     Factory: {
-      address: "0xdc3f0638e9dfe172a0a53be118887c89dd8ac3ab",
+      address: "0x4f60e00ac3033623ce74232bd58ee196d495dc01",
       abi: [
         {
           type: "constructor",
@@ -113,10 +113,10 @@ const deployedContracts = {
         },
       ],
       inheritedFunctions: {},
-      deployedOnBlock: 39435968,
+      deployedOnBlock: 39437362,
     },
     SmartWallet: {
-      address: "0xd418b02665add762f4d529295223696916bee0fd",
+      address: "0x397ba2487588a4183807bbba3fbeb8fab0ca887d",
       abi: [
         {
           type: "constructor",
@@ -129,20 +129,7 @@ const deployedContracts = {
         },
         {
           type: "function",
-          name: "addOperator",
-          inputs: [
-            {
-              name: "operator",
-              type: "address",
-              internalType: "address",
-            },
-          ],
-          outputs: [],
-          stateMutability: "nonpayable",
-        },
-        {
-          type: "function",
-          name: "addPasskeyOperator",
+          name: "addPasskey",
           inputs: [
             {
               name: "qx",
@@ -658,25 +645,6 @@ const deployedContracts = {
         },
         {
           type: "function",
-          name: "operators",
-          inputs: [
-            {
-              name: "",
-              type: "address",
-              internalType: "address",
-            },
-          ],
-          outputs: [
-            {
-              name: "",
-              type: "bool",
-              internalType: "bool",
-            },
-          ],
-          stateMutability: "view",
-        },
-        {
-          type: "function",
           name: "owner",
           inputs: [],
           outputs: [
@@ -741,20 +709,7 @@ const deployedContracts = {
         },
         {
           type: "function",
-          name: "removeOperator",
-          inputs: [
-            {
-              name: "operator",
-              type: "address",
-              internalType: "address",
-            },
-          ],
-          outputs: [],
-          stateMutability: "nonpayable",
-        },
-        {
-          type: "function",
-          name: "removePasskeyOperator",
+          name: "removePasskey",
           inputs: [
             {
               name: "qx",
@@ -833,7 +788,7 @@ const deployedContracts = {
           name: "MetaExecuted",
           inputs: [
             {
-              name: "operator",
+              name: "passkey",
               type: "address",
               indexed: true,
               internalType: "address",
@@ -861,32 +816,6 @@ const deployedContracts = {
         },
         {
           type: "event",
-          name: "OperatorAdded",
-          inputs: [
-            {
-              name: "operator",
-              type: "address",
-              indexed: true,
-              internalType: "address",
-            },
-          ],
-          anonymous: false,
-        },
-        {
-          type: "event",
-          name: "OperatorRemoved",
-          inputs: [
-            {
-              name: "operator",
-              type: "address",
-              indexed: true,
-              internalType: "address",
-            },
-          ],
-          anonymous: false,
-        },
-        {
-          type: "event",
           name: "OwnershipTransferred",
           inputs: [
             {
@@ -906,7 +835,7 @@ const deployedContracts = {
         },
         {
           type: "event",
-          name: "PasskeyOperatorAdded",
+          name: "PasskeyAdded",
           inputs: [
             {
               name: "passkeyAddress",
@@ -931,7 +860,7 @@ const deployedContracts = {
         },
         {
           type: "event",
-          name: "PasskeyOperatorRemoved",
+          name: "PasskeyRemoved",
           inputs: [
             {
               name: "passkeyAddress",
@@ -1001,11 +930,6 @@ const deployedContracts = {
         },
         {
           type: "error",
-          name: "NotOperator",
-          inputs: [],
-        },
-        {
-          type: "error",
           name: "OwnableInvalidOwner",
           inputs: [
             {
@@ -1038,7 +962,7 @@ const deployedContracts = {
         },
       ],
       inheritedFunctions: {},
-      deployedOnBlock: 39435968,
+      deployedOnBlock: 39437362,
     },
   },
   31337: {

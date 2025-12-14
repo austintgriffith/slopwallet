@@ -307,16 +307,16 @@ export async function loginWithPasskey(checkIsOperator?: (passkeyAddress: `0x${s
     };
   }
 
-  // OPTIMIZATION: If checkIsOperator is provided, try to find the registered operator
+  // OPTIMIZATION: If checkIsPasskey is provided, try to find the registered passkey
   // This avoids the second signature for already-registered passkeys
   if (checkIsOperator) {
-    console.log("Login: checking candidates against on-chain operators...");
+    console.log("Login: checking candidates against on-chain passkeys...");
     for (const candidate of candidates) {
       const passkeyAddress = getPasskeyAddress(candidate.qx, candidate.qy);
       try {
-        const isOperator = await checkIsOperator(passkeyAddress);
-        if (isOperator) {
-          console.log("Login: found registered operator with single signature!", {
+        const isRegistered = await checkIsOperator(passkeyAddress);
+        if (isRegistered) {
+          console.log("Login: found registered passkey with single signature!", {
             qx: candidate.qx,
             qy: candidate.qy,
             passkeyAddress,
@@ -330,7 +330,7 @@ export async function loginWithPasskey(checkIsOperator?: (passkeyAddress: `0x${s
           };
         }
       } catch (e) {
-        console.warn("Failed to check operator status:", e);
+        console.warn("Failed to check passkey status:", e);
       }
     }
     console.log("Login: no registered operator found among candidates, requesting second signature...");
@@ -479,11 +479,38 @@ export async function signWithPasskey(
   const response = credential.response as AuthenticatorAssertionResponse;
 
   // Parse the signature (DER-encoded) to get r and s values
-  const { r, s } = parseSignature(response.signature);
+  const { r, s: rawS } = parseSignature(response.signature);
+
+  // Normalize S to low-S form (required by some WebAuthn verifiers)
+  // ECDSA signatures have two valid S values: S and N-S (where N is curve order)
+  // Some implementations require S < N/2 (low-S)
+  const P256_N = BigInt("0xffffffff00000000ffffffffffffffffbce6faada7179e84f3b9cac2fc632551");
+  const halfN = P256_N / 2n;
+  const sValue = BigInt(rawS);
+  let s: `0x${string}`;
+
+  if (sValue > halfN) {
+    console.log(">>> S VALUE IS HIGH - normalizing to low-S");
+    console.log("Original S:", rawS);
+    const normalizedS = P256_N - sValue;
+    s = `0x${normalizedS.toString(16).padStart(64, "0")}` as `0x${string}`;
+    console.log("Normalized S:", s);
+  } else {
+    s = rawS;
+  }
 
   // Get authenticator data and client data JSON
   const authenticatorData = bufferToHex(response.authenticatorData);
   const clientDataJSON = new TextDecoder().decode(response.clientDataJSON);
+
+  // Log raw WebAuthn response for debugging
+  console.log("=== WEBAUTHN RAW RESPONSE ===");
+  console.log("credentialId used:", credentialId);
+  console.log("authenticatorData (hex):", authenticatorData);
+  console.log("signature (hex):", bufferToHex(response.signature));
+  console.log("clientDataJSON:", clientDataJSON);
+  console.log("Parsed r:", r);
+  console.log("Parsed s (after normalization):", s);
 
   // Find the indices of "challenge" and "type" in clientDataJSON
   const challengeIndex = clientDataJSON.indexOf('"challenge"');
