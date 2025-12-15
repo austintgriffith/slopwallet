@@ -20,6 +20,16 @@ import {
   signWithPasskey,
 } from "~~/utils/passkey";
 
+// Facilitate API response type
+interface FacilitateResponse {
+  success?: boolean;
+  txHash?: string;
+  blockNumber?: string;
+  gasUsed?: string;
+  error?: string;
+  details?: string;
+}
+
 interface PendingTransactionQueueProps {
   smartWalletAddress: string;
   pendingTransactions: PendingTransaction[];
@@ -56,10 +66,44 @@ export const PendingTransactionQueue = ({
   // Track which transactions are being processed
   const [signingIds, setSigningIds] = useState<Set<string>>(new Set());
   const [relayingIds, setRelayingIds] = useState<Set<string>>(new Set());
+  const [facilitatingIds, setFacilitatingIds] = useState<Set<string>>(new Set());
+  const [confirmedTxHashes, setConfirmedTxHashes] = useState<Record<string, string>>({});
 
   const canSign = currentPasskey && isPasskeyRegistered && passkeyNonce !== undefined;
 
-  // Sign a pending transaction with passkey
+  // Submit signed transaction to facilitator API
+  const submitToFacilitator = async (pendingTxId: string, signedTx: SignedTransaction): Promise<FacilitateResponse> => {
+    const response = await fetch("/api/facilitate", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        smartWalletAddress,
+        chainId,
+        isBatch: signedTx.isBatch,
+        calls: signedTx.calls.map(c => ({
+          target: c.target,
+          value: c.value.toString(),
+          data: c.data,
+        })),
+        qx: signedTx.qx,
+        qy: signedTx.qy,
+        deadline: signedTx.deadline.toString(),
+        auth: {
+          r: signedTx.auth.r,
+          s: signedTx.auth.s,
+          challengeIndex: signedTx.auth.challengeIndex.toString(),
+          typeIndex: signedTx.auth.typeIndex.toString(),
+          authenticatorData: signedTx.auth.authenticatorData,
+          clientDataJSON: signedTx.auth.clientDataJSON,
+        },
+      }),
+    });
+
+    const data: FacilitateResponse = await response.json();
+    return data;
+  };
+
+  // Sign a pending transaction with passkey and auto-submit to facilitator
   const handleSign = async (pendingTx: PendingTransaction) => {
     if (!currentPasskey) return;
 
@@ -132,13 +176,63 @@ export const PendingTransactionQueue = ({
         sourceMeta: pendingTx.sourceMeta,
       };
 
-      onUpdatePendingStatus(pendingTx.id, "signed");
-      onAddSigned(signedTx);
+      // Update status to signed
+      setSigningIds(prev => {
+        const next = new Set(prev);
+        next.delete(pendingTx.id);
+        return next;
+      });
+
+      // Auto-submit to facilitator API
+      setFacilitatingIds(prev => new Set(prev).add(pendingTx.id));
+      onUpdatePendingStatus(pendingTx.id, "relaying"); // Use "relaying" status for facilitator submission
+
+      console.log("[Facilitate] Submitting signed transaction to API...");
+
+      const facilitateResult = await submitToFacilitator(pendingTx.id, signedTx);
+
+      if (facilitateResult.success && facilitateResult.txHash) {
+        console.log("[Facilitate] Transaction confirmed:", facilitateResult.txHash);
+
+        // Store the confirmed tx hash for display
+        setConfirmedTxHashes(prev => ({
+          ...prev,
+          [pendingTx.id]: facilitateResult.txHash!,
+        }));
+
+        onUpdatePendingStatus(pendingTx.id, "confirmed");
+
+        // Refetch nonce for next transaction
+        await refetchPasskeyNonce();
+
+        // Auto-remove after a short delay to show confirmation
+        setTimeout(() => {
+          onRemovePending(pendingTx.id);
+          setConfirmedTxHashes(prev => {
+            const next = { ...prev };
+            delete next[pendingTx.id];
+            return next;
+          });
+        }, 5000);
+      } else {
+        // Facilitator failed - show error but keep the signed tx for manual relay
+        const errorMsg = facilitateResult.error || "Facilitator submission failed";
+        console.error("[Facilitate] Failed:", errorMsg, facilitateResult.details);
+
+        // Add to signed transactions so user can manually relay
+        onUpdatePendingStatus(pendingTx.id, "signed");
+        onAddSigned(signedTx);
+      }
     } catch (error) {
       console.error("Failed to sign transaction:", error);
       onUpdatePendingStatus(pendingTx.id, "failed", error instanceof Error ? error.message : "Failed to sign");
     } finally {
       setSigningIds(prev => {
+        const next = new Set(prev);
+        next.delete(pendingTx.id);
+        return next;
+      });
+      setFacilitatingIds(prev => {
         const next = new Set(prev);
         next.delete(pendingTx.id);
         return next;
@@ -306,6 +400,8 @@ export const PendingTransactionQueue = ({
           const signedTx = getSignedTx(pendingTx.id);
           const isSigning = signingIds.has(pendingTx.id);
           const isRelaying = relayingIds.has(pendingTx.id);
+          const isFacilitating = facilitatingIds.has(pendingTx.id);
+          const confirmedTxHash = confirmedTxHashes[pendingTx.id];
 
           return (
             <div key={pendingTx.id} className="bg-base-100 rounded-xl p-4 space-y-4">
@@ -325,7 +421,7 @@ export const PendingTransactionQueue = ({
                       onRemoveSigned(pendingTx.id);
                       onRemovePending(pendingTx.id);
                     }}
-                    disabled={isSigning || isRelaying}
+                    disabled={isSigning || isRelaying || isFacilitating}
                   >
                     Dismiss
                   </button>
@@ -355,12 +451,46 @@ export const PendingTransactionQueue = ({
                 )}
               </div>
 
+              {/* Confirmed Transaction Display */}
+              {pendingTx.status === "confirmed" && confirmedTxHash && (
+                <div className="bg-success/10 border border-success rounded-lg p-4">
+                  <div className="flex items-center gap-2 mb-2">
+                    <span className="text-success text-lg">✓</span>
+                    <span className="text-success font-medium">Transaction Confirmed!</span>
+                  </div>
+                  <div className="text-sm opacity-70">
+                    <span>Tx: </span>
+                    <a
+                      href={`https://basescan.org/tx/${confirmedTxHash}`}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="link link-primary font-mono text-xs"
+                    >
+                      {confirmedTxHash.slice(0, 10)}...{confirmedTxHash.slice(-8)}
+                    </a>
+                  </div>
+                </div>
+              )}
+
+              {/* Facilitating Status */}
+              {isFacilitating && (
+                <div className="bg-info/10 border border-info rounded-lg p-4">
+                  <div className="flex items-center gap-3">
+                    <span className="loading loading-spinner loading-md text-info"></span>
+                    <div>
+                      <p className="text-info font-medium">Transaction is being processed...</p>
+                      <p className="text-xs opacity-70">Waiting for on-chain confirmation</p>
+                    </div>
+                  </div>
+                </div>
+              )}
+
               {/* Actions */}
-              {pendingTx.status === "pending" && !signedTx && (
+              {pendingTx.status === "pending" && !signedTx && !isFacilitating && (
                 <button
                   className="btn btn-primary w-full"
                   onClick={() => handleSign(pendingTx)}
-                  disabled={!canSign || isSigning}
+                  disabled={!canSign || isSigning || isFacilitating}
                 >
                   {isSigning ? (
                     <>
@@ -373,11 +503,11 @@ export const PendingTransactionQueue = ({
                 </button>
               )}
 
-              {/* Signed Transaction Ready for Relay */}
-              {signedTx && pendingTx.status === "signed" && (
+              {/* Signed Transaction Ready for Relay (fallback if facilitator fails) */}
+              {signedTx && pendingTx.status === "signed" && !isFacilitating && (
                 <div className="space-y-3">
-                  <div className="bg-success/10 border border-success rounded-lg p-3">
-                    <p className="text-success text-sm font-medium">Transaction Signed!</p>
+                  <div className="bg-warning/10 border border-warning rounded-lg p-3">
+                    <p className="text-warning text-sm font-medium">Facilitator unavailable - Manual relay required</p>
                     <p className="text-xs opacity-70 mt-1">
                       Expires: {new Date(Number(signedTx.deadline) * 1000).toLocaleString()}
                     </p>

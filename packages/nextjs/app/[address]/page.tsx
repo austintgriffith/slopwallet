@@ -196,6 +196,30 @@ const WalletPage = () => {
     auth: WebAuthnAuth;
   } | null>(null);
 
+  // Quick Transfer state (API-based passkey transfer)
+  const [quickTransferRecipient, setQuickTransferRecipient] = useState("");
+  const [quickTransferAmount, setQuickTransferAmount] = useState("");
+  const [quickTransferAsset, setQuickTransferAsset] = useState<"ETH" | "USDC">("ETH");
+  const [isQuickTransferring, setIsQuickTransferring] = useState(false);
+  const [quickTransferStatus, setQuickTransferStatus] = useState<string | null>(null);
+  const [quickTransferTxHash, setQuickTransferTxHash] = useState<string | null>(null);
+  const [quickTransferError, setQuickTransferError] = useState<string | null>(null);
+
+  // Quick Swap state (API-based passkey swap)
+  const [swapDirection, setSwapDirection] = useState<"USDC_TO_ETH" | "ETH_TO_USDC">("USDC_TO_ETH");
+  const [swapAmountIn, setSwapAmountIn] = useState("");
+  const [debouncedSwapAmount] = useDebounceValue(swapAmountIn, 500);
+  const [swapQuote, setSwapQuote] = useState<{
+    amountOut: string;
+    amountOutRaw: string;
+    pricePerToken: string;
+  } | null>(null);
+  const [isLoadingQuote, setIsLoadingQuote] = useState(false);
+  const [isQuickSwapping, setIsQuickSwapping] = useState(false);
+  const [swapStatus, setSwapStatus] = useState<string | null>(null);
+  const [swapTxHash, setSwapTxHash] = useState<string | null>(null);
+  const [swapError, setSwapError] = useState<string | null>(null);
+
   // Resolve ENS name if needed
   const isEnsName = recipientAddress.endsWith(".eth");
   const { data: resolvedEnsAddress } = useEnsAddress({
@@ -756,6 +780,340 @@ const WalletPage = () => {
     setSignedMetaTx(null);
   };
 
+  // Resolve ENS for quick transfer recipient
+  const isQuickTransferRecipientEns = quickTransferRecipient.endsWith(".eth");
+  const { data: resolvedQuickTransferRecipient } = useEnsAddress({
+    name: isQuickTransferRecipientEns ? normalize(quickTransferRecipient) : undefined,
+    chainId: 1,
+  });
+  const finalQuickTransferRecipient = isQuickTransferRecipientEns
+    ? resolvedQuickTransferRecipient
+    : quickTransferRecipient;
+
+  // Quick Transfer: Get calldata from API, sign with passkey, submit to facilitator
+  const handleQuickTransfer = async () => {
+    if (!currentPasskey) {
+      setQuickTransferError("Please log in with a passkey first");
+      return;
+    }
+
+    if (!finalQuickTransferRecipient || !isAddress(finalQuickTransferRecipient)) {
+      setQuickTransferError("Invalid recipient address");
+      return;
+    }
+
+    if (!quickTransferAmount || parseFloat(quickTransferAmount) <= 0) {
+      setQuickTransferError("Invalid amount");
+      return;
+    }
+
+    setIsQuickTransferring(true);
+    setQuickTransferError(null);
+    setQuickTransferTxHash(null);
+    setQuickTransferStatus("Getting transfer data...");
+
+    try {
+      // Step 1: Get calldata from the transfer API
+      const transferResponse = await fetch("/api/transfer", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          asset: quickTransferAsset,
+          amount: quickTransferAmount,
+          to: finalQuickTransferRecipient,
+        }),
+      });
+
+      const transferData = await transferResponse.json();
+      if (!transferData.success) {
+        throw new Error(transferData.error || "Failed to get transfer calldata");
+      }
+
+      setQuickTransferStatus("Please sign with passkey...");
+
+      // Step 2: Get fresh nonce and sign with passkey
+      const freshNonce = await readContract(config, {
+        address: walletAddress as `0x${string}`,
+        abi: SMART_WALLET_ABI,
+        functionName: "nonces",
+        args: [currentPasskey.passkeyAddress],
+        chainId: base.id,
+      });
+
+      const target = transferData.call.target as `0x${string}`;
+      const value = BigInt(transferData.call.value);
+      const data = transferData.call.data as `0x${string}`;
+      const deadline = BigInt(Math.floor(Date.now() / 1000) + 3600); // 1 hour
+
+      // Build challenge hash for Base chain
+      const challengeHash = buildChallengeHash(
+        BigInt(base.id),
+        walletAddress as `0x${string}`,
+        target,
+        value,
+        data,
+        freshNonce,
+        deadline,
+      );
+
+      // Convert to bytes for WebAuthn
+      const challengeBytes = new Uint8Array(
+        (challengeHash.slice(2).match(/.{2}/g) || []).map(byte => parseInt(byte, 16)),
+      );
+
+      // Sign with passkey
+      const { auth } = await signWithPasskey(currentPasskey.credentialId, challengeBytes);
+
+      setQuickTransferStatus("Submitting transaction...");
+
+      // Step 3: Submit to facilitator API
+      const facilitateResponse = await fetch("/api/facilitate", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          smartWalletAddress: walletAddress,
+          chainId: base.id,
+          isBatch: false,
+          calls: [
+            {
+              target,
+              value: value.toString(),
+              data,
+            },
+          ],
+          qx: currentPasskey.qx,
+          qy: currentPasskey.qy,
+          deadline: deadline.toString(),
+          auth: {
+            r: auth.r,
+            s: auth.s,
+            challengeIndex: auth.challengeIndex.toString(),
+            typeIndex: auth.typeIndex.toString(),
+            authenticatorData: auth.authenticatorData,
+            clientDataJSON: auth.clientDataJSON,
+          },
+        }),
+      });
+
+      const facilitateData = await facilitateResponse.json();
+
+      if (facilitateData.success && facilitateData.txHash) {
+        setQuickTransferTxHash(facilitateData.txHash);
+        setQuickTransferStatus("Transaction confirmed!");
+        // Clear the form
+        setQuickTransferRecipient("");
+        setQuickTransferAmount("");
+        // Refetch nonce
+        await refetchPasskeyNonce();
+      } else {
+        throw new Error(facilitateData.error || "Transaction failed");
+      }
+    } catch (error) {
+      console.error("[Quick Transfer] Error:", error);
+      setQuickTransferError(error instanceof Error ? error.message : "Transfer failed");
+      setQuickTransferStatus(null);
+    } finally {
+      setIsQuickTransferring(false);
+    }
+  };
+
+  // ===========================================
+  // Quick Swap Functions
+  // ===========================================
+
+  // Fetch swap quote when amount changes
+  useEffect(() => {
+    const fetchQuote = async () => {
+      if (!debouncedSwapAmount || parseFloat(debouncedSwapAmount) <= 0) {
+        setSwapQuote(null);
+        return;
+      }
+
+      setIsLoadingQuote(true);
+      setSwapError(null);
+
+      try {
+        const from = swapDirection === "USDC_TO_ETH" ? "USDC" : "ETH";
+        const to = swapDirection === "USDC_TO_ETH" ? "ETH" : "USDC";
+
+        const response = await fetch(`/api/swap/quote?from=${from}&to=${to}&amountIn=${debouncedSwapAmount}`);
+        const data = await response.json();
+
+        if (data.error) {
+          setSwapError(data.error);
+          setSwapQuote(null);
+        } else {
+          setSwapQuote({
+            amountOut: data.amountOut,
+            amountOutRaw: data.amountOutRaw,
+            pricePerToken: data.pricePerToken,
+          });
+        }
+      } catch (error) {
+        console.error("[Swap Quote] Error:", error);
+        setSwapError("Failed to fetch quote");
+        setSwapQuote(null);
+      } finally {
+        setIsLoadingQuote(false);
+      }
+    };
+
+    fetchQuote();
+  }, [debouncedSwapAmount, swapDirection]);
+
+  // Execute swap: get calldata, sign with passkey, submit to facilitator
+  const handleQuickSwap = async () => {
+    if (!currentPasskey) {
+      setSwapError("Please log in with a passkey first");
+      return;
+    }
+
+    if (!swapAmountIn || parseFloat(swapAmountIn) <= 0) {
+      setSwapError("Invalid amount");
+      return;
+    }
+
+    if (!swapQuote) {
+      setSwapError("Please wait for quote");
+      return;
+    }
+
+    setIsQuickSwapping(true);
+    setSwapError(null);
+    setSwapTxHash(null);
+    setSwapStatus("Getting swap data...");
+
+    try {
+      const from = swapDirection === "USDC_TO_ETH" ? "USDC" : "ETH";
+      const to = swapDirection === "USDC_TO_ETH" ? "ETH" : "USDC";
+
+      // Apply 0.5% slippage tolerance
+      const amountOutNum = parseFloat(swapQuote.amountOut);
+      const amountOutMinimum = (amountOutNum * 0.995).toString();
+
+      // Step 1: Get swap calldata from API
+      const swapResponse = await fetch("/api/swap", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          from,
+          to,
+          amountIn: swapAmountIn,
+          amountOutMinimum,
+          recipient: walletAddress,
+        }),
+      });
+
+      const swapData = await swapResponse.json();
+      if (!swapData.success) {
+        throw new Error(swapData.error || "Failed to get swap calldata");
+      }
+
+      setSwapStatus("Please sign with passkey...");
+
+      // Step 2: Get fresh nonce and build challenge hash for batch
+      const freshNonce = await readContract(config, {
+        address: walletAddress as `0x${string}`,
+        abi: SMART_WALLET_ABI,
+        functionName: "nonces",
+        args: [currentPasskey.passkeyAddress],
+        chainId: base.id,
+      });
+
+      const deadline = BigInt(Math.floor(Date.now() / 1000) + 3600); // 1 hour
+
+      // Convert calls from API response to proper format
+      const calls = swapData.calls.map((call: { target: string; value: string; data: string }) => ({
+        target: call.target as `0x${string}`,
+        value: BigInt(call.value),
+        data: call.data as `0x${string}`,
+      }));
+
+      // Build challenge hash - use batch format for multiple calls, single format for one call
+      let challengeHash: `0x${string}`;
+      if (calls.length > 1) {
+        // Import buildBatchChallengeHash for multi-call transactions
+        const { buildBatchChallengeHash } = await import("~~/utils/passkey");
+        challengeHash = buildBatchChallengeHash(
+          BigInt(base.id),
+          walletAddress as `0x${string}`,
+          calls,
+          freshNonce,
+          deadline,
+        );
+      } else {
+        // Single call - use single tx challenge hash
+        const call = calls[0];
+        challengeHash = buildChallengeHash(
+          BigInt(base.id),
+          walletAddress as `0x${string}`,
+          call.target,
+          call.value,
+          call.data,
+          freshNonce,
+          deadline,
+        );
+      }
+
+      // Convert to bytes for WebAuthn
+      const challengeBytes = new Uint8Array(
+        (challengeHash.slice(2).match(/.{2}/g) || []).map(byte => parseInt(byte, 16)),
+      );
+
+      // Sign with passkey
+      const { auth } = await signWithPasskey(currentPasskey.credentialId, challengeBytes);
+
+      setSwapStatus("Submitting transaction...");
+
+      // Step 3: Submit to facilitator API
+      const facilitateResponse = await fetch("/api/facilitate", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          smartWalletAddress: walletAddress,
+          chainId: base.id,
+          isBatch: calls.length > 1,
+          calls: calls.map((c: { target: string; value: bigint; data: string }) => ({
+            target: c.target,
+            value: c.value.toString(),
+            data: c.data,
+          })),
+          qx: currentPasskey.qx,
+          qy: currentPasskey.qy,
+          deadline: deadline.toString(),
+          auth: {
+            r: auth.r,
+            s: auth.s,
+            challengeIndex: auth.challengeIndex.toString(),
+            typeIndex: auth.typeIndex.toString(),
+            authenticatorData: auth.authenticatorData,
+            clientDataJSON: auth.clientDataJSON,
+          },
+        }),
+      });
+
+      const facilitateData = await facilitateResponse.json();
+
+      if (facilitateData.success && facilitateData.txHash) {
+        setSwapTxHash(facilitateData.txHash);
+        setSwapStatus("Swap completed!");
+        // Clear the form
+        setSwapAmountIn("");
+        setSwapQuote(null);
+        // Refetch nonce
+        await refetchPasskeyNonce();
+      } else {
+        throw new Error(facilitateData.error || "Swap failed");
+      }
+    } catch (error) {
+      console.error("[Quick Swap] Error:", error);
+      setSwapError(error instanceof Error ? error.message : "Swap failed");
+      setSwapStatus(null);
+    } finally {
+      setIsQuickSwapping(false);
+    }
+  };
+
   // ===========================================
   // Pending Transaction Queue Handlers
   // ===========================================
@@ -1161,7 +1519,310 @@ const WalletPage = () => {
                 )}
               </div>
             </div>
+          </div>
+        </div>
 
+        {/* Quick Transfer Section */}
+        {currentPasskey && isPasskeyRegistered && (
+          <div className="bg-base-200 rounded-3xl p-6 mb-8">
+            <h2 className="text-2xl font-semibold mb-4">Quick Transfer (Gasless)</h2>
+            <p className="text-sm opacity-70 mb-4">Transfer ETH or USDC instantly with your passkey - no gas fees!</p>
+
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
+              {/* Asset Selection */}
+              <div>
+                <label className="label">
+                  <span className="label-text">Asset</span>
+                </label>
+                <select
+                  className="select select-bordered w-full"
+                  value={quickTransferAsset}
+                  onChange={e => setQuickTransferAsset(e.target.value as "ETH" | "USDC")}
+                  disabled={isQuickTransferring}
+                >
+                  <option value="ETH">
+                    ETH ({ethBalance ? parseFloat(formatEther(ethBalance.value)).toFixed(4) : "0"})
+                  </option>
+                  <option value="USDC">
+                    USDC (
+                    {usdcBalance !== undefined
+                      ? parseFloat(formatUnits(usdcBalance, 6)).toLocaleString(undefined, { maximumFractionDigits: 2 })
+                      : "0"}
+                    )
+                  </option>
+                </select>
+              </div>
+
+              {/* Amount Input */}
+              <div>
+                <label className="label">
+                  <span className="label-text">Amount</span>
+                  <span
+                    className="label-text-alt cursor-pointer hover:underline"
+                    onClick={() => {
+                      if (quickTransferAsset === "ETH" && ethBalance) {
+                        setQuickTransferAmount(formatEther(ethBalance.value));
+                      } else if (quickTransferAsset === "USDC" && usdcBalance !== undefined) {
+                        setQuickTransferAmount(formatUnits(usdcBalance, 6));
+                      }
+                    }}
+                  >
+                    Max
+                  </span>
+                </label>
+                <input
+                  type="number"
+                  placeholder="0.0"
+                  className="input input-bordered w-full"
+                  value={quickTransferAmount}
+                  onChange={e => setQuickTransferAmount(e.target.value)}
+                  disabled={isQuickTransferring}
+                  step="any"
+                  min="0"
+                />
+              </div>
+            </div>
+
+            {/* Recipient Input */}
+            <div className="mb-4">
+              <label className="label">
+                <span className="label-text">Recipient Address</span>
+              </label>
+              <AddressInput
+                value={quickTransferRecipient}
+                onChange={setQuickTransferRecipient}
+                placeholder="0x... or ENS name"
+                disabled={isQuickTransferring}
+              />
+              {isQuickTransferRecipientEns && resolvedQuickTransferRecipient && (
+                <p className="text-xs mt-1 opacity-70">
+                  Resolved: <Address address={resolvedQuickTransferRecipient} format="short" />
+                </p>
+              )}
+            </div>
+
+            {/* Status Display */}
+            {quickTransferStatus && (
+              <div className="bg-info/10 border border-info rounded-xl p-4 mb-4">
+                <div className="flex items-center gap-3">
+                  {isQuickTransferring && <span className="loading loading-spinner loading-md text-info"></span>}
+                  <span className={isQuickTransferring ? "text-info" : "text-success"}>{quickTransferStatus}</span>
+                </div>
+              </div>
+            )}
+
+            {/* Success Display */}
+            {quickTransferTxHash && (
+              <div className="bg-success/10 border border-success rounded-xl p-4 mb-4">
+                <div className="flex items-center gap-2 mb-2">
+                  <span className="text-success text-lg">✓</span>
+                  <span className="text-success font-medium">Transfer Complete!</span>
+                </div>
+                <a
+                  href={`https://basescan.org/tx/${quickTransferTxHash}`}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="link link-primary text-sm"
+                >
+                  View on Basescan →
+                </a>
+              </div>
+            )}
+
+            {/* Error Display */}
+            {quickTransferError && (
+              <div className="alert alert-error mb-4">
+                <span>{quickTransferError}</span>
+              </div>
+            )}
+
+            {/* Transfer Button */}
+            <button
+              className="btn btn-primary w-full"
+              onClick={handleQuickTransfer}
+              disabled={
+                isQuickTransferring ||
+                !quickTransferRecipient ||
+                !quickTransferAmount ||
+                parseFloat(quickTransferAmount) <= 0
+              }
+            >
+              {isQuickTransferring ? (
+                <>
+                  <span className="loading loading-spinner loading-sm"></span>
+                  Processing...
+                </>
+              ) : (
+                `Transfer ${quickTransferAmount || "0"} ${quickTransferAsset}`
+              )}
+            </button>
+          </div>
+        )}
+
+        {/* Quick Swap Section */}
+        {currentPasskey && isPasskeyRegistered && (
+          <div className="bg-base-200 rounded-3xl p-6 mb-8">
+            <h2 className="text-2xl font-semibold mb-4">Quick Swap (Gasless)</h2>
+            <p className="text-sm opacity-70 mb-4">
+              Swap between ETH and USDC instantly with your passkey - no gas fees!
+            </p>
+
+            {/* Direction Toggle */}
+            <div className="mb-4">
+              <label className="label">
+                <span className="label-text">Swap Direction</span>
+              </label>
+              <div className="btn-group w-full">
+                <button
+                  className={`btn flex-1 ${swapDirection === "USDC_TO_ETH" ? "btn-primary" : "btn-ghost"}`}
+                  onClick={() => {
+                    setSwapDirection("USDC_TO_ETH");
+                    setSwapAmountIn("");
+                    setSwapQuote(null);
+                    setSwapError(null);
+                  }}
+                  disabled={isQuickSwapping}
+                >
+                  USDC → ETH
+                </button>
+                <button
+                  className={`btn flex-1 ${swapDirection === "ETH_TO_USDC" ? "btn-primary" : "btn-ghost"}`}
+                  onClick={() => {
+                    setSwapDirection("ETH_TO_USDC");
+                    setSwapAmountIn("");
+                    setSwapQuote(null);
+                    setSwapError(null);
+                  }}
+                  disabled={isQuickSwapping}
+                >
+                  ETH → USDC
+                </button>
+              </div>
+            </div>
+
+            {/* Amount Input */}
+            <div className="mb-4">
+              <label className="label">
+                <span className="label-text">Amount ({swapDirection === "USDC_TO_ETH" ? "USDC" : "ETH"})</span>
+                <span
+                  className="label-text-alt cursor-pointer hover:underline"
+                  onClick={() => {
+                    if (swapDirection === "USDC_TO_ETH" && usdcBalance !== undefined) {
+                      setSwapAmountIn(formatUnits(usdcBalance, 6));
+                    } else if (swapDirection === "ETH_TO_USDC" && ethBalance) {
+                      setSwapAmountIn(formatEther(ethBalance.value));
+                    }
+                  }}
+                >
+                  Max:{" "}
+                  {swapDirection === "USDC_TO_ETH"
+                    ? usdcBalance !== undefined
+                      ? parseFloat(formatUnits(usdcBalance, 6)).toLocaleString(undefined, { maximumFractionDigits: 2 })
+                      : "0"
+                    : ethBalance
+                      ? parseFloat(formatEther(ethBalance.value)).toFixed(4)
+                      : "0"}
+                </span>
+              </label>
+              <input
+                type="number"
+                placeholder="0.0"
+                className="input input-bordered w-full"
+                value={swapAmountIn}
+                onChange={e => setSwapAmountIn(e.target.value)}
+                disabled={isQuickSwapping}
+                step="any"
+                min="0"
+              />
+            </div>
+
+            {/* Quote Display */}
+            {(isLoadingQuote || swapQuote) && (
+              <div className="bg-base-100 rounded-xl p-4 mb-4">
+                <p className="text-sm font-medium opacity-60 mb-2">You will receive</p>
+                {isLoadingQuote ? (
+                  <div className="flex items-center gap-2">
+                    <span className="loading loading-spinner loading-sm"></span>
+                    <span className="opacity-60">Getting quote...</span>
+                  </div>
+                ) : swapQuote ? (
+                  <div>
+                    <p className="text-xl font-semibold">
+                      {parseFloat(swapQuote.amountOut).toLocaleString(undefined, {
+                        minimumFractionDigits: swapDirection === "USDC_TO_ETH" ? 6 : 2,
+                        maximumFractionDigits: swapDirection === "USDC_TO_ETH" ? 6 : 2,
+                      })}{" "}
+                      {swapDirection === "USDC_TO_ETH" ? "ETH" : "USDC"}
+                    </p>
+                    <p className="text-xs opacity-60 mt-1">
+                      Rate: 1 {swapDirection === "USDC_TO_ETH" ? "USDC" : "ETH"} = {swapQuote.pricePerToken}{" "}
+                      {swapDirection === "USDC_TO_ETH" ? "ETH" : "USDC"}
+                    </p>
+                    <p className="text-xs opacity-60">Fee: 0.05% • Slippage: 0.5%</p>
+                  </div>
+                ) : null}
+              </div>
+            )}
+
+            {/* Status Display */}
+            {swapStatus && (
+              <div className="bg-info/10 border border-info rounded-xl p-4 mb-4">
+                <div className="flex items-center gap-3">
+                  {isQuickSwapping && <span className="loading loading-spinner loading-md text-info"></span>}
+                  <span className={isQuickSwapping ? "text-info" : "text-success"}>{swapStatus}</span>
+                </div>
+              </div>
+            )}
+
+            {/* Success Display */}
+            {swapTxHash && (
+              <div className="bg-success/10 border border-success rounded-xl p-4 mb-4">
+                <div className="flex items-center gap-2 mb-2">
+                  <span className="text-success text-lg">✓</span>
+                  <span className="text-success font-medium">Swap Complete!</span>
+                </div>
+                <a
+                  href={`https://basescan.org/tx/${swapTxHash}`}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="link link-primary text-sm"
+                >
+                  View on Basescan →
+                </a>
+              </div>
+            )}
+
+            {/* Error Display */}
+            {swapError && (
+              <div className="alert alert-error mb-4">
+                <span>{swapError}</span>
+              </div>
+            )}
+
+            {/* Swap Button */}
+            <button
+              className="btn btn-primary w-full"
+              onClick={handleQuickSwap}
+              disabled={
+                isQuickSwapping || !swapAmountIn || parseFloat(swapAmountIn) <= 0 || !swapQuote || isLoadingQuote
+              }
+            >
+              {isQuickSwapping ? (
+                <>
+                  <span className="loading loading-spinner loading-sm"></span>
+                  Processing...
+                </>
+              ) : (
+                `Swap ${swapAmountIn || "0"} ${swapDirection === "USDC_TO_ETH" ? "USDC" : "ETH"} → ${
+                  swapQuote ? parseFloat(swapQuote.amountOut).toFixed(swapDirection === "USDC_TO_ETH" ? 6 : 2) : "?"
+                } ${swapDirection === "USDC_TO_ETH" ? "ETH" : "USDC"}`
+              )}
+            </button>
+          </div>
+        )}
+
+        <div className="bg-base-200 rounded-3xl p-6 mb-8">
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
             {/* Owner */}
             <div className="bg-base-100 rounded-xl p-4">
               <p className="text-sm font-medium opacity-60 mb-1">Owner</p>

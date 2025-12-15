@@ -241,6 +241,16 @@ interface SignedMetaTx {
   auth: WebAuthnAuth;
 }
 
+// Facilitate API response type
+interface FacilitateResponse {
+  success?: boolean;
+  txHash?: string;
+  blockNumber?: string;
+  gasUsed?: string;
+  error?: string;
+  details?: string;
+}
+
 // Session Request Card Component
 const SessionRequestCard = ({
   request,
@@ -273,11 +283,56 @@ const SessionRequestCard = ({
   const [isSigningWithPasskey, setIsSigningWithPasskey] = useState(false);
   const [signedMetaTx, setSignedMetaTx] = useState<SignedMetaTx | null>(null);
   const [isRelaying, setIsRelaying] = useState(false);
+  const [isFacilitating, setIsFacilitating] = useState(false);
+  const [confirmedTxHash, setConfirmedTxHash] = useState<string | null>(null);
 
   const config = useConfig();
   const { writeContractAsync } = useWriteContract();
   const publicClient = usePublicClient();
   const { address: connectedAddress } = useAccount();
+
+  // Submit signed transaction to facilitator API
+  const submitToFacilitator = async (signedTx: SignedMetaTx, requestChainId: number): Promise<FacilitateResponse> => {
+    const calls =
+      signedTx.isBatch && signedTx.calls
+        ? signedTx.calls.map(c => ({
+            target: c.target,
+            value: c.value.toString(),
+            data: c.data,
+          }))
+        : [
+            {
+              target: signedTx.target!,
+              value: signedTx.value!.toString(),
+              data: signedTx.data!,
+            },
+          ];
+
+    const response = await fetch("/api/facilitate", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        smartWalletAddress,
+        chainId: requestChainId,
+        isBatch: signedTx.isBatch,
+        calls,
+        qx: signedTx.qx,
+        qy: signedTx.qy,
+        deadline: signedTx.deadline.toString(),
+        auth: {
+          r: signedTx.auth.r,
+          s: signedTx.auth.s,
+          challengeIndex: signedTx.auth.challengeIndex.toString(),
+          typeIndex: signedTx.auth.typeIndex.toString(),
+          authenticatorData: signedTx.auth.authenticatorData,
+          clientDataJSON: signedTx.auth.clientDataJSON,
+        },
+      }),
+    });
+
+    const data: FacilitateResponse = await response.json();
+    return data;
+  };
 
   const getMethodLabel = (method: string) => {
     switch (method) {
@@ -502,14 +557,51 @@ const SessionRequestCard = ({
         // Sign with passkey
         const { auth } = await signWithPasskey(currentPasskey.credentialId, challengeBytes);
 
-        setSignedMetaTx({
+        const signedTx: SignedMetaTx = {
           isBatch: true,
           calls,
           qx: currentPasskey.qx,
           qy: currentPasskey.qy,
           deadline,
           auth,
-        });
+        };
+
+        // Auto-submit to facilitator API
+        setIsSigningWithPasskey(false);
+        setIsFacilitating(true);
+
+        console.log("[WC Facilitate] Submitting batch transaction to API...");
+        const facilitateResult = await submitToFacilitator(signedTx, requestChainId);
+
+        if (facilitateResult.success && facilitateResult.txHash) {
+          console.log("[WC Facilitate] Transaction confirmed:", facilitateResult.txHash);
+          setConfirmedTxHash(facilitateResult.txHash);
+
+          // Handle EIP-5792 response
+          if (request.batchId) {
+            updateBatchStatus(request.batchId, {
+              status: 200,
+              txHash: facilitateResult.txHash,
+            });
+          }
+
+          // Refetch nonce for next transaction
+          await refetchPasskeyNonce();
+
+          // Auto-clear after showing confirmation
+          setTimeout(() => {
+            onClear();
+            setConfirmedTxHash(null);
+          }, 3000);
+        } else {
+          // Facilitator failed - fall back to manual relay
+          console.error("[WC Facilitate] Failed:", facilitateResult.error, facilitateResult.details);
+          setSignedMetaTx(signedTx);
+          setTxError(`Facilitator unavailable: ${facilitateResult.error}. You can relay manually.`);
+        }
+
+        setIsFacilitating(false);
+        return; // Exit early since we handled everything
       } else {
         // Handle single transaction
         const target = (request.params.to || "0x0000000000000000000000000000000000000000") as `0x${string}`;
@@ -566,7 +658,7 @@ const SessionRequestCard = ({
         // Sign with passkey
         const { auth } = await signWithPasskey(currentPasskey.credentialId, challengeBytes);
 
-        setSignedMetaTx({
+        const signedTx: SignedMetaTx = {
           isBatch: false,
           target,
           value,
@@ -575,11 +667,42 @@ const SessionRequestCard = ({
           qy: currentPasskey.qy,
           deadline,
           auth,
-        });
+        };
+
+        // Auto-submit to facilitator API
+        setIsSigningWithPasskey(false);
+        setIsFacilitating(true);
+
+        console.log("[WC Facilitate] Submitting single transaction to API...");
+        const facilitateResult = await submitToFacilitator(signedTx, requestChainId);
+
+        if (facilitateResult.success && facilitateResult.txHash) {
+          console.log("[WC Facilitate] Transaction confirmed:", facilitateResult.txHash);
+          setConfirmedTxHash(facilitateResult.txHash);
+
+          // For regular eth_sendTransaction, send the transaction hash back to the dApp
+          await onApprove(request.id, request.topic, facilitateResult.txHash);
+
+          // Refetch nonce for next transaction
+          await refetchPasskeyNonce();
+
+          // Auto-clear after showing confirmation
+          setTimeout(() => {
+            setConfirmedTxHash(null);
+          }, 3000);
+        } else {
+          // Facilitator failed - fall back to manual relay
+          console.error("[WC Facilitate] Failed:", facilitateResult.error, facilitateResult.details);
+          setSignedMetaTx(signedTx);
+          setTxError(`Facilitator unavailable: ${facilitateResult.error}. You can relay manually.`);
+        }
+
+        setIsFacilitating(false);
       }
     } catch (err) {
       console.error("Failed to sign with passkey:", err);
       setTxError(err instanceof Error ? err.message : "Failed to sign with passkey");
+      setIsFacilitating(false);
     } finally {
       setIsSigningWithPasskey(false);
     }
@@ -1014,15 +1137,49 @@ const SessionRequestCard = ({
         </div>
       )}
 
+      {/* Confirmed Transaction Display */}
+      {confirmedTxHash && (
+        <div className="bg-success/10 border border-success rounded-xl p-4 mt-4">
+          <div className="flex items-center gap-2 mb-2">
+            <span className="text-success text-lg">✓</span>
+            <span className="text-success font-medium">Transaction Confirmed!</span>
+          </div>
+          <div className="text-sm opacity-70">
+            <span>Tx: </span>
+            <a
+              href={`https://basescan.org/tx/${confirmedTxHash}`}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="link link-primary font-mono text-xs"
+            >
+              {confirmedTxHash.slice(0, 10)}...{confirmedTxHash.slice(-8)}
+            </a>
+          </div>
+        </div>
+      )}
+
+      {/* Facilitating Status */}
+      {isFacilitating && (
+        <div className="bg-info/10 border border-info rounded-xl p-4 mt-4">
+          <div className="flex items-center gap-3">
+            <span className="loading loading-spinner loading-md text-info"></span>
+            <div>
+              <p className="text-info font-medium">Transaction is being processed...</p>
+              <p className="text-xs opacity-70">Waiting for on-chain confirmation</p>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Action Buttons */}
-      {(isTransaction || isBatchCall) && !signedMetaTx && (
+      {(isTransaction || isBatchCall) && !signedMetaTx && !isFacilitating && !confirmedTxHash && (
         <div className="space-y-3 mt-4">
           {/* Primary Execute Button (Owner/Operator) */}
           <div className="flex gap-2">
             <button
               className="btn btn-primary flex-1"
               onClick={handleExecute}
-              disabled={isExecuting || isSigningWithPasskey}
+              disabled={isExecuting || isSigningWithPasskey || isFacilitating}
             >
               {isExecuting ? (
                 <>
@@ -1035,7 +1192,11 @@ const SessionRequestCard = ({
                 "Execute Transaction"
               )}
             </button>
-            <button className="btn btn-ghost" onClick={handleReject} disabled={isExecuting || isSigningWithPasskey}>
+            <button
+              className="btn btn-ghost"
+              onClick={handleReject}
+              disabled={isExecuting || isSigningWithPasskey || isFacilitating}
+            >
               Reject
             </button>
           </div>
@@ -1043,11 +1204,11 @@ const SessionRequestCard = ({
           {/* Passkey Signing Option */}
           {isPasskeyOperator && currentPasskey && (
             <>
-              <div className="divider text-xs opacity-60 my-2">OR sign with passkey</div>
+              <div className="divider text-xs opacity-60 my-2">OR sign with passkey (gasless)</div>
               <button
                 className="btn btn-secondary w-full"
                 onClick={handleSignWithPasskey}
-                disabled={isSigningWithPasskey || isExecuting}
+                disabled={isSigningWithPasskey || isExecuting || isFacilitating}
               >
                 {isSigningWithPasskey ? (
                   <>
@@ -1058,17 +1219,17 @@ const SessionRequestCard = ({
                   "Sign with Passkey"
                 )}
               </button>
-              <p className="text-xs text-center opacity-60">Sign now, anyone can relay later and pay gas</p>
+              <p className="text-xs text-center opacity-60">Transaction will be submitted automatically</p>
             </>
           )}
         </div>
       )}
 
-      {/* Signed Meta Transaction Display */}
-      {signedMetaTx && (
-        <div className="bg-success/10 border border-success rounded-xl p-4 mt-4 space-y-4">
+      {/* Signed Meta Transaction Display (fallback when facilitator fails) */}
+      {signedMetaTx && !isFacilitating && !confirmedTxHash && (
+        <div className="bg-warning/10 border border-warning rounded-xl p-4 mt-4 space-y-4">
           <div className="flex items-center justify-between">
-            <p className="text-sm font-medium text-success">Transaction Signed!</p>
+            <p className="text-sm font-medium text-warning">Facilitator unavailable - Manual relay required</p>
             <button className="btn btn-xs btn-ghost" onClick={handleClearSignedTx}>
               Clear
             </button>
