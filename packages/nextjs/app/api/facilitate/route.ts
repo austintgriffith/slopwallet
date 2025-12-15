@@ -13,7 +13,10 @@ const SUPPORTED_CHAINS: Record<number, Chain> = {
 
 // Whitelist of smart wallet addresses we will pay gas for
 // Add addresses in lowercase for case-insensitive comparison
-const WHITELISTED_SMART_WALLETS: Set<string> = new Set(["0x2e39e83B58052c4E0fCdFD9fB021BEa74eeFe833".toLowerCase()]);
+const WHITELISTED_SMART_WALLETS: Set<string> = new Set([
+  "0x2e39e83B58052c4E0fCdFD9fB021BEa74eeFe833".toLowerCase(),
+  "0x4bde57255b1bbe86eb0715c4ffd0041024c4c05c".toLowerCase(),
+]);
 
 /**
  * Derive passkey address from public key coordinates (matches contract logic)
