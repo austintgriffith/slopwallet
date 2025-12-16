@@ -1,4 +1,7 @@
+import { OPTIONS, jsonResponse } from "../cors";
 import { encodeFunctionData, isAddress, parseEther, parseUnits } from "viem";
+
+export { OPTIONS };
 
 // Contract addresses on Base
 const USDC_ADDRESS = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913" as const;
@@ -68,30 +71,27 @@ export async function POST(request: Request) {
 
     // Validate required fields
     if (!body.from || !body.to || !body.amountIn || !body.amountOutMinimum || !body.recipient) {
-      return Response.json(
-        { error: "Missing required fields: from, to, amountIn, amountOutMinimum, recipient" },
-        { status: 400 },
-      );
+      return jsonResponse({ error: "Missing required fields: from, to, amountIn, amountOutMinimum, recipient" }, 400);
     }
 
     const from = body.from.toUpperCase();
     const to = body.to.toUpperCase();
 
     if ((from !== "ETH" && from !== "USDC") || (to !== "ETH" && to !== "USDC")) {
-      return Response.json({ error: "Invalid asset. Must be ETH or USDC" }, { status: 400 });
+      return jsonResponse({ error: "Invalid asset. Must be ETH or USDC" }, 400);
     }
 
     if (from === to) {
-      return Response.json({ error: "Cannot swap same asset" }, { status: 400 });
+      return jsonResponse({ error: "Cannot swap same asset" }, 400);
     }
 
     if (!isAddress(body.recipient)) {
-      return Response.json({ error: "Invalid recipient address" }, { status: 400 });
+      return jsonResponse({ error: "Invalid recipient address" }, 400);
     }
 
     const amountNum = parseFloat(body.amountIn);
     if (isNaN(amountNum) || amountNum <= 0) {
-      return Response.json({ error: "Invalid amountIn. Must be a positive number" }, { status: 400 });
+      return jsonResponse({ error: "Invalid amountIn. Must be a positive number" }, 400);
     }
 
     const calls: Array<{ target: `0x${string}`; value: string; data: `0x${string}` }> = [];
@@ -178,7 +178,7 @@ export async function POST(request: Request) {
       });
     }
 
-    return Response.json({
+    return jsonResponse({
       success: true,
       from,
       to,
@@ -189,12 +189,12 @@ export async function POST(request: Request) {
     });
   } catch (error) {
     console.error("[Swap API] Error:", error);
-    return Response.json(
+    return jsonResponse(
       {
         error: "Failed to generate swap calldata",
         details: error instanceof Error ? error.message : String(error),
       },
-      { status: 500 },
+      500,
     );
   }
 }

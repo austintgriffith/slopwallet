@@ -1,5 +1,8 @@
+import { OPTIONS, jsonResponse } from "../../cors";
 import { createPublicClient, formatEther, formatUnits, http, parseEther, parseUnits } from "viem";
 import { base } from "viem/chains";
+
+export { OPTIONS };
 
 // Contract addresses on Base
 const USDC_ADDRESS = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913" as const;
@@ -51,20 +54,20 @@ export async function GET(request: Request) {
 
     // Validate parameters
     if (!from || !to || !amountIn) {
-      return Response.json({ error: "Missing required parameters: from, to, amountIn" }, { status: 400 });
+      return jsonResponse({ error: "Missing required parameters: from, to, amountIn" }, 400);
     }
 
     if ((from !== "ETH" && from !== "USDC") || (to !== "ETH" && to !== "USDC")) {
-      return Response.json({ error: "Invalid asset. Must be ETH or USDC" }, { status: 400 });
+      return jsonResponse({ error: "Invalid asset. Must be ETH or USDC" }, 400);
     }
 
     if (from === to) {
-      return Response.json({ error: "Cannot swap same asset" }, { status: 400 });
+      return jsonResponse({ error: "Cannot swap same asset" }, 400);
     }
 
     const amountNum = parseFloat(amountIn);
     if (isNaN(amountNum) || amountNum <= 0) {
-      return Response.json({ error: "Invalid amountIn. Must be a positive number" }, { status: 400 });
+      return jsonResponse({ error: "Invalid amountIn. Must be a positive number" }, 400);
     }
 
     // Determine token addresses and decimals based on direction
@@ -117,7 +120,7 @@ export async function GET(request: Request) {
     // Calculate price per token
     const pricePerToken = amountNum > 0 ? parseFloat(formattedAmountOut) / amountNum : 0;
 
-    return Response.json({
+    return jsonResponse({
       from,
       to,
       amountIn,
@@ -134,15 +137,15 @@ export async function GET(request: Request) {
     // Check for common errors
     const errorMessage = error instanceof Error ? error.message : String(error);
     if (errorMessage.includes("insufficient liquidity")) {
-      return Response.json({ error: "Insufficient liquidity for this swap" }, { status: 400 });
+      return jsonResponse({ error: "Insufficient liquidity for this swap" }, 400);
     }
 
-    return Response.json(
+    return jsonResponse(
       {
         error: "Failed to get swap quote",
         details: errorMessage,
       },
-      { status: 500 },
+      500,
     );
   }
 }

@@ -1,9 +1,12 @@
+import { OPTIONS, jsonResponse } from "../cors";
 import { p256 } from "@noble/curves/nist.js";
 import { sha256 } from "@noble/hashes/sha2.js";
 import { Chain, concat, createPublicClient, createWalletClient, http, isAddress, keccak256, toHex } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
 import { base, mainnet } from "viem/chains";
 import { SMART_WALLET_ABI } from "~~/contracts/SmartWalletAbi";
+
+export { OPTIONS };
 
 // Supported chains for facilitation
 const SUPPORTED_CHAINS: Record<number, Chain> = {
@@ -176,7 +179,7 @@ export async function POST(request: Request) {
     const facilitatorPrivateKey = process.env.FACILITATOR_PRIVATE_KEY;
     if (!facilitatorPrivateKey) {
       console.error("FACILITATOR_PRIVATE_KEY not configured");
-      return Response.json({ error: "Facilitator not configured" }, { status: 500 });
+      return jsonResponse({ error: "Facilitator not configured" }, 500);
     }
 
     // Parse request body
@@ -184,27 +187,27 @@ export async function POST(request: Request) {
 
     // Validate required fields
     if (!body.smartWalletAddress || !isAddress(body.smartWalletAddress)) {
-      return Response.json({ error: "Invalid smart wallet address" }, { status: 400 });
+      return jsonResponse({ error: "Invalid smart wallet address" }, 400);
     }
 
     if (!body.chainId || !SUPPORTED_CHAINS[body.chainId]) {
-      return Response.json({ error: `Unsupported chain ID: ${body.chainId}` }, { status: 400 });
+      return jsonResponse({ error: `Unsupported chain ID: ${body.chainId}` }, 400);
     }
 
     if (!body.calls || !Array.isArray(body.calls) || body.calls.length === 0) {
-      return Response.json({ error: "Missing or invalid calls" }, { status: 400 });
+      return jsonResponse({ error: "Missing or invalid calls" }, 400);
     }
 
     if (!body.qx || !body.qy) {
-      return Response.json({ error: "Missing passkey public key (qx, qy)" }, { status: 400 });
+      return jsonResponse({ error: "Missing passkey public key (qx, qy)" }, 400);
     }
 
     if (!body.deadline) {
-      return Response.json({ error: "Missing deadline" }, { status: 400 });
+      return jsonResponse({ error: "Missing deadline" }, 400);
     }
 
     if (!body.auth) {
-      return Response.json({ error: "Missing WebAuthn auth data" }, { status: 400 });
+      return jsonResponse({ error: "Missing WebAuthn auth data" }, 400);
     }
 
     // ============================================
@@ -213,7 +216,7 @@ export async function POST(request: Request) {
     const normalizedWalletAddress = body.smartWalletAddress.toLowerCase();
     if (!WHITELISTED_SMART_WALLETS.has(normalizedWalletAddress)) {
       console.warn(`[Facilitate] Rejected: wallet ${body.smartWalletAddress} is not whitelisted`);
-      return Response.json({ error: "Smart wallet is not whitelisted for facilitation" }, { status: 403 });
+      return jsonResponse({ error: "Smart wallet is not whitelisted for facilitation" }, 403);
     }
 
     const chain = SUPPORTED_CHAINS[body.chainId];
@@ -246,7 +249,7 @@ export async function POST(request: Request) {
       console.warn(
         `[Facilitate] Rejected: passkey ${passkeyAddress} is not registered on wallet ${body.smartWalletAddress}`,
       );
-      return Response.json({ error: "Passkey is not registered on this smart wallet" }, { status: 403 });
+      return jsonResponse({ error: "Passkey is not registered on this smart wallet" }, 403);
     }
 
     console.log(`[Facilitate] Passkey ${passkeyAddress} verified as registered on wallet`);
@@ -268,10 +271,7 @@ export async function POST(request: Request) {
 
     if (!isValidSignature) {
       console.warn(`[Facilitate] Rejected: WebAuthn signature verification failed`);
-      return Response.json(
-        { error: "Invalid WebAuthn signature - cryptographic verification failed" },
-        { status: 403 },
-      );
+      return jsonResponse({ error: "Invalid WebAuthn signature - cryptographic verification failed" }, 403);
     }
 
     console.log(`[Facilitate] WebAuthn signature cryptographically verified`);
@@ -328,10 +328,7 @@ export async function POST(request: Request) {
           console.warn(`[Facilitate] Challenge mismatch!`);
           console.warn(`  Submitted: ${submittedChallenge}`);
           console.warn(`  Expected:  ${expectedChallenge}`);
-          return Response.json(
-            { error: "Challenge hash mismatch - transaction parameters don't match signature" },
-            { status: 403 },
-          );
+          return jsonResponse({ error: "Challenge hash mismatch - transaction parameters don't match signature" }, 403);
         }
 
         console.log(`[Facilitate] Challenge hash verified - signature matches transaction parameters`);
@@ -390,12 +387,12 @@ export async function POST(request: Request) {
       } catch (simError) {
         console.error("[Facilitate] Simulation failed:", simError);
         const errorMsg = simError instanceof Error ? simError.message : String(simError);
-        return Response.json(
+        return jsonResponse(
           {
             error: "Transaction simulation failed",
             details: errorMsg,
           },
-          { status: 400 },
+          400,
         );
       }
 
@@ -425,12 +422,12 @@ export async function POST(request: Request) {
       } catch (simError) {
         console.error("[Facilitate] Simulation failed:", simError);
         const errorMsg = simError instanceof Error ? simError.message : String(simError);
-        return Response.json(
+        return jsonResponse(
           {
             error: "Transaction simulation failed",
             details: errorMsg,
           },
-          { status: 400 },
+          400,
         );
       }
 
@@ -454,18 +451,18 @@ export async function POST(request: Request) {
     console.log(`[Facilitate] Transaction confirmed in block ${receipt.blockNumber}`);
 
     if (receipt.status === "reverted") {
-      return Response.json(
+      return jsonResponse(
         {
           error: "Transaction reverted",
           txHash,
           blockNumber: receipt.blockNumber.toString(),
         },
-        { status: 400 },
+        400,
       );
     }
 
     // Success!
-    return Response.json({
+    return jsonResponse({
       success: true,
       txHash,
       blockNumber: receipt.blockNumber.toString(),
@@ -477,21 +474,18 @@ export async function POST(request: Request) {
 
     // Check for specific error types
     if (errorMessage.includes("InvalidSignature")) {
-      return Response.json({ error: "Invalid passkey signature", details: errorMessage }, { status: 400 });
+      return jsonResponse({ error: "Invalid passkey signature", details: errorMessage }, 400);
     }
     if (errorMessage.includes("ExpiredSignature")) {
-      return Response.json({ error: "Signature has expired", details: errorMessage }, { status: 400 });
+      return jsonResponse({ error: "Signature has expired", details: errorMessage }, 400);
     }
     if (errorMessage.includes("PasskeyNotRegistered")) {
-      return Response.json(
-        { error: "Passkey is not registered on this wallet", details: errorMessage },
-        { status: 400 },
-      );
+      return jsonResponse({ error: "Passkey is not registered on this wallet", details: errorMessage }, 400);
     }
     if (errorMessage.includes("ExecutionFailed")) {
-      return Response.json({ error: "Transaction execution failed", details: errorMessage }, { status: 400 });
+      return jsonResponse({ error: "Transaction execution failed", details: errorMessage }, 400);
     }
 
-    return Response.json({ error: errorMessage }, { status: 500 });
+    return jsonResponse({ error: errorMessage }, 500);
   }
 }

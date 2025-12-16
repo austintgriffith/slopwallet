@@ -1,6 +1,9 @@
+import { OPTIONS, jsonResponse } from "../cors";
 import Anthropic from "@anthropic-ai/sdk";
 import { createPublicClient, erc20Abi, formatEther, formatUnits, http, isAddress } from "viem";
 import { base } from "viem/chains";
+
+export { OPTIONS };
 
 const USDC = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913" as const;
 const WETH = "0x4200000000000000000000000000000000000006" as const;
@@ -70,22 +73,22 @@ export async function POST(request: Request) {
     const { prompt, walletAddress } = await request.json();
 
     if (!prompt || typeof prompt !== "string") {
-      return Response.json({ error: "Missing prompt" }, { status: 400 });
+      return jsonResponse({ error: "Missing prompt" }, 400);
     }
 
     if (!walletAddress || !isAddress(walletAddress)) {
-      return Response.json({ error: "Invalid wallet address" }, { status: 400 });
+      return jsonResponse({ error: "Invalid wallet address" }, 400);
     }
 
     const anthropicApiKey = process.env.ANTHROPIC_API_KEY;
     const alchemyApiKey = process.env.ALCHEMY_API_KEY || process.env.NEXT_PUBLIC_ALCHEMY_API_KEY;
 
     if (!anthropicApiKey) {
-      return Response.json({ error: "ANTHROPIC_API_KEY not configured" }, { status: 500 });
+      return jsonResponse({ error: "ANTHROPIC_API_KEY not configured" }, 500);
     }
 
     if (!alchemyApiKey) {
-      return Response.json({ error: "ALCHEMY_API_KEY not configured" }, { status: 500 });
+      return jsonResponse({ error: "ALCHEMY_API_KEY not configured" }, 500);
     }
 
     // Build context and fetch holdings
@@ -116,14 +119,14 @@ export async function POST(request: Request) {
     // Parse JSON response from Claude
     try {
       const parsed = JSON.parse(responseText);
-      return Response.json(parsed);
+      return jsonResponse(parsed);
     } catch {
       // If Claude didn't return valid JSON, wrap it as a response
-      return Response.json({ response: responseText });
+      return jsonResponse({ response: responseText });
     }
   } catch (error) {
     console.error("Agent API error:", error);
     const errorMessage = error instanceof Error ? error.message : "Unknown error";
-    return Response.json({ error: errorMessage }, { status: 500 });
+    return jsonResponse({ error: errorMessage }, 500);
   }
 }

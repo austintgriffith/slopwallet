@@ -2,6 +2,9 @@
  * API route to proxy requests to the Unblind API
  * This keeps the API key server-side and handles request formatting
  */
+import { OPTIONS, jsonResponse } from "../cors";
+
+export { OPTIONS };
 
 const UNBLIND_API_URL = "https://api.unblind.app";
 
@@ -110,7 +113,7 @@ export async function POST(request: Request) {
         clearTimeout(timeoutId);
         if (fetchError instanceof Error && fetchError.name === "AbortError") {
           console.error("[Unblind] Request timed out");
-          return Response.json({ error: "Analysis request timed out" }, { status: 504 });
+          return jsonResponse({ error: "Analysis request timed out" }, 504);
         }
         throw fetchError;
       }
@@ -119,10 +122,7 @@ export async function POST(request: Request) {
       if (!response.ok) {
         const errorText = await response.text();
         console.error("[Unblind] Transaction API error:", response.status, errorText);
-        return Response.json(
-          { error: `Unblind API error: ${response.status}`, details: errorText },
-          { status: response.status },
-        );
+        return jsonResponse({ error: `Unblind API error: ${response.status}`, details: errorText }, response.status);
       }
 
       const result: UnblindTransactionResponse = await response.json();
@@ -131,7 +131,7 @@ export async function POST(request: Request) {
         console.log("[Unblind] Warnings:", result.warnings);
       }
 
-      return Response.json({
+      return jsonResponse({
         analysis: result.analysis,
         warnings: result.warnings || [],
       });
@@ -158,10 +158,7 @@ export async function POST(request: Request) {
       if (!response.ok) {
         const errorText = await response.text();
         console.error("[Unblind] Message API error:", response.status, errorText);
-        return Response.json(
-          { error: `Unblind API error: ${response.status}`, details: errorText },
-          { status: response.status },
-        );
+        return jsonResponse({ error: `Unblind API error: ${response.status}`, details: errorText }, response.status);
       }
 
       const result: UnblindMessageResponse = await response.json();
@@ -170,16 +167,16 @@ export async function POST(request: Request) {
         console.log("[Unblind] Warnings:", result.warnings);
       }
 
-      return Response.json({
+      return jsonResponse({
         analysis: result.analysis,
         warnings: result.warnings || [],
       });
     } else {
-      return Response.json({ error: "Invalid request type. Use 'transaction' or 'message'" }, { status: 400 });
+      return jsonResponse({ error: "Invalid request type. Use 'transaction' or 'message'" }, 400);
     }
   } catch (error) {
     console.error("[Unblind] Error:", error);
     const errorMessage = error instanceof Error ? error.message : "Unknown error";
-    return Response.json({ error: errorMessage }, { status: 500 });
+    return jsonResponse({ error: errorMessage }, 500);
   }
 }
