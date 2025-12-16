@@ -1,16 +1,8 @@
 # SlopWallet.com
 
-> an experiment with smart contract wallet factories, wallet connecting, and eventually passkey verification 
-
+> an experiment with smart contract wallet factories, wallet connecting, and eventually passkey verification
 
 # built with 🏗 Scaffold-ETH 2
-
-
-
-
-
-
-
 
 ## Quickstart
 
@@ -39,7 +31,22 @@ yarn deploy
 
 This command deploys a test smart contract to the local network. The contract is located in `packages/foundry/contracts` and can be modified to suit your needs. The `yarn deploy` command uses the deploy script located in `packages/foundry/script` to deploy the contract to the network. You can also customize the deploy script.
 
-4. On a third terminal, start your NextJS app:
+4. Configure environment variables:
+
+Create a `.env.local` file in `packages/nextjs/` with:
+
+```
+# Alchemy API key for RPC access
+NEXT_PUBLIC_ALCHEMY_API_KEY=your_alchemy_api_key
+
+# Facilitator private key for gasless transactions (server-side only)
+FACILITATOR_PRIVATE_KEY=0x...
+
+# Unblind API key for transaction analysis (server-side only)
+UNBLIND_API_KEY=your_unblind_api_key
+```
+
+5. On a third terminal, start your NextJS app:
 
 ```
 yarn start
@@ -52,7 +59,6 @@ Run smart contract test with `yarn foundry:test`
 - Edit your smart contracts in `packages/foundry/contracts`
 - Edit your frontend homepage at `packages/nextjs/app/page.tsx`. For guidance on [routing](https://nextjs.org/docs/app/building-your-application/routing/defining-routes) and configuring [pages/layouts](https://nextjs.org/docs/app/building-your-application/routing/pages-and-layouts) checkout the Next.js documentation.
 - Edit your deployment scripts in `packages/foundry/script`
-
 
 ## Documentation
 

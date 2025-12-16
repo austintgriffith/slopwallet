@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import Image from "next/image";
 import { Address } from "@scaffold-ui/components";
 import { formatEther, toHex } from "viem";
@@ -286,10 +286,108 @@ const SessionRequestCard = ({
   const [isFacilitating, setIsFacilitating] = useState(false);
   const [confirmedTxHash, setConfirmedTxHash] = useState<string | null>(null);
 
+  // Unblind transaction analysis state
+  const [unblindAnalysis, setUnblindAnalysis] = useState<string | null>(null);
+  const [unblindWarnings, setUnblindWarnings] = useState<string[]>([]);
+  const [isLoadingAnalysis, setIsLoadingAnalysis] = useState(false);
+  const [analysisError, setAnalysisError] = useState<string | null>(null);
+  const analysisRequestedRef = useRef<number | null>(null); // Track which request ID we've analyzed
+
   const config = useConfig();
   const { writeContractAsync } = useWriteContract();
   const publicClient = usePublicClient();
   const { address: connectedAddress } = useAccount();
+
+  const isTransaction = request.method === "eth_sendTransaction";
+  const isBatchCall = request.method === "wallet_sendCalls";
+
+  // Fetch Unblind analysis when request is displayed
+  useEffect(() => {
+    const fetchUnblindAnalysis = async () => {
+      // Only analyze transaction requests
+      if (!isTransaction && !isBatchCall) return;
+
+      // Prevent duplicate requests (React StrictMode causes double renders)
+      if (analysisRequestedRef.current === request.id) {
+        return;
+      }
+      analysisRequestedRef.current = request.id;
+
+      setIsLoadingAnalysis(true);
+      setAnalysisError(null);
+
+      try {
+        // Pass the chainId as-is - the API route will handle format conversion
+        let chainIdForApi = request.chainId;
+        const chainIdMatch = request.chainId?.match(/eip155:(\d+)/);
+        if (chainIdMatch) {
+          chainIdForApi = chainIdMatch[1];
+        }
+
+        if (isBatchCall && request.calls && request.calls.length > 0) {
+          // For batch calls, analyze the first call (primary transaction)
+          // TODO: Could analyze all calls and combine results
+          const firstCall = request.calls[0];
+          const response = await fetch("/api/unblind", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              type: "transaction",
+              chainId: chainIdForApi,
+              from: smartWalletAddress,
+              to: firstCall.to,
+              value: firstCall.value || "0x0",
+              data: firstCall.data || "0x",
+              gas: firstCall.gas,
+            }),
+          });
+
+          if (response.ok) {
+            const result = await response.json();
+            const batchNote = request.calls.length > 1 ? ` (This is call 1 of ${request.calls.length} in a batch)` : "";
+            setUnblindAnalysis(result.analysis + batchNote);
+            setUnblindWarnings(result.warnings || []);
+          } else {
+            const error = await response.json();
+            console.error("[Unblind] Analysis failed:", error);
+            setAnalysisError(error.error || "Failed to analyze transaction");
+          }
+        } else if (isTransaction) {
+          // Single transaction
+          const response = await fetch("/api/unblind", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              type: "transaction",
+              chainId: chainIdForApi,
+              from: smartWalletAddress,
+              to: request.params.to,
+              value: request.params.value || "0x0",
+              data: request.params.data || "0x",
+              gas: request.params.gas,
+            }),
+          });
+
+          if (response.ok) {
+            const result = await response.json();
+            setUnblindAnalysis(result.analysis);
+            setUnblindWarnings(result.warnings || []);
+          } else {
+            const error = await response.json();
+            console.error("[Unblind] Analysis failed:", error);
+            setAnalysisError(error.error || "Failed to analyze transaction");
+          }
+        }
+      } catch (err) {
+        console.error("[Unblind] Error fetching analysis:", err);
+        setAnalysisError("Failed to connect to analysis service");
+      } finally {
+        setIsLoadingAnalysis(false);
+      }
+    };
+
+    fetchUnblindAnalysis();
+  }, [request.id, request.chainId, request.params, request.calls, smartWalletAddress, isTransaction, isBatchCall]);
 
   // Submit signed transaction to facilitator API
   const submitToFacilitator = async (signedTx: SignedMetaTx, requestChainId: number): Promise<FacilitateResponse> => {
@@ -353,9 +451,6 @@ const SessionRequestCard = ({
       return value;
     }
   };
-
-  const isTransaction = request.method === "eth_sendTransaction";
-  const isBatchCall = request.method === "wallet_sendCalls";
 
   const handleExecute = async () => {
     if (!isTransaction && !isBatchCall) return;
@@ -1127,6 +1222,55 @@ const SessionRequestCard = ({
               </div>
             ))}
           </div>
+        </div>
+      )}
+
+      {/* Unblind Transaction Analysis */}
+      {(isTransaction || isBatchCall) && (
+        <div className="mt-4 pt-3 border-t border-base-300">
+          <div className="flex items-center gap-2 mb-2">
+            <span className="text-lg">🔍</span>
+            <p className="text-sm font-medium">Transaction Analysis</p>
+          </div>
+
+          {isLoadingAnalysis && (
+            <div className="bg-base-300 rounded-xl p-4 flex items-center gap-3">
+              <span className="loading loading-spinner loading-sm"></span>
+              <span className="text-sm opacity-70">Analyzing transaction...</span>
+            </div>
+          )}
+
+          {analysisError && !isLoadingAnalysis && (
+            <div className="bg-base-300 rounded-xl p-4">
+              <p className="text-sm opacity-60">Unable to analyze: {analysisError}</p>
+            </div>
+          )}
+
+          {unblindAnalysis && !isLoadingAnalysis && (
+            <div className="space-y-3">
+              {/* Main Analysis */}
+              <div className="bg-primary/10 border border-primary/30 rounded-xl p-4">
+                <p className="text-sm leading-relaxed">{unblindAnalysis}</p>
+              </div>
+
+              {/* Warnings */}
+              {unblindWarnings.length > 0 && (
+                <div className="bg-warning/10 border border-warning/50 rounded-xl p-4 space-y-2">
+                  <div className="flex items-center gap-2">
+                    <span className="text-warning text-lg">⚠️</span>
+                    <span className="text-warning font-medium text-sm">Warnings</span>
+                  </div>
+                  <ul className="space-y-1">
+                    {unblindWarnings.map((warning, index) => (
+                      <li key={index} className="text-sm text-warning/90 leading-relaxed">
+                        {warning}
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+            </div>
+          )}
         </div>
       )}
 

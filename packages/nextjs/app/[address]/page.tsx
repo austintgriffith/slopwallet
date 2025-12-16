@@ -220,6 +220,14 @@ const WalletPage = () => {
   const [swapTxHash, setSwapTxHash] = useState<string | null>(null);
   const [swapError, setSwapError] = useState<string | null>(null);
 
+  // External Passkey state (for adding passkeys from other devices)
+  const [externalPasskeyQx, setExternalPasskeyQx] = useState("");
+  const [externalPasskeyQy, setExternalPasskeyQy] = useState("");
+  const [externalPasskeyCredentialId, setExternalPasskeyCredentialId] = useState("");
+  const [isAddingExternalPasskey, setIsAddingExternalPasskey] = useState(false);
+  const [externalPasskeyError, setExternalPasskeyError] = useState<string | null>(null);
+  const [externalPasskeySuccess, setExternalPasskeySuccess] = useState<string | null>(null);
+
   // Resolve ENS name if needed
   const isEnsName = recipientAddress.endsWith(".eth");
   const { data: resolvedEnsAddress } = useEnsAddress({
@@ -657,6 +665,54 @@ const WalletPage = () => {
     clearPasskeyFromStorage(walletAddress);
     setCurrentPasskey(null);
     setPasskeyError(null);
+  };
+
+  // Add external passkey (from another device)
+  const handleAddExternalPasskey = async () => {
+    if (!externalPasskeyQx || !externalPasskeyQy || !externalPasskeyCredentialId) {
+      setExternalPasskeyError("Please fill in all fields (Qx, Qy, and Credential ID)");
+      return;
+    }
+
+    // Validate hex format
+    if (!externalPasskeyQx.startsWith("0x") || externalPasskeyQx.length !== 66) {
+      setExternalPasskeyError("Qx must be a 32-byte hex string (0x + 64 hex chars)");
+      return;
+    }
+    if (!externalPasskeyQy.startsWith("0x") || externalPasskeyQy.length !== 66) {
+      setExternalPasskeyError("Qy must be a 32-byte hex string (0x + 64 hex chars)");
+      return;
+    }
+
+    setIsAddingExternalPasskey(true);
+    setExternalPasskeyError(null);
+    setExternalPasskeySuccess(null);
+
+    try {
+      // Compute the credentialIdHash from the provided credential ID
+      const credentialIdHash = getCredentialIdHash(externalPasskeyCredentialId);
+
+      await writeAddPasskey({
+        address: walletAddress as `0x${string}`,
+        abi: SMART_WALLET_ABI,
+        functionName: "addPasskey",
+        args: [externalPasskeyQx as `0x${string}`, externalPasskeyQy as `0x${string}`, credentialIdHash],
+      });
+
+      // Success!
+      setExternalPasskeySuccess("External passkey added successfully!");
+      setExternalPasskeyQx("");
+      setExternalPasskeyQy("");
+      setExternalPasskeyCredentialId("");
+
+      // Refetch passkeyCreated flag
+      await refetchPasskeyCreated();
+    } catch (error) {
+      console.error("Failed to add external passkey:", error);
+      setExternalPasskeyError(error instanceof Error ? error.message : "Failed to add external passkey");
+    } finally {
+      setIsAddingExternalPasskey(false);
+    }
   };
 
   // Sign ETH transfer with passkey
@@ -2118,6 +2174,206 @@ const WalletPage = () => {
             </div>
           )}
         </div>
+
+        {/* Export Passkey Info - Share with others so they can add your passkey */}
+        {currentPasskey && (
+          <div className="bg-base-200 rounded-3xl p-6 mb-8">
+            <h2 className="text-2xl font-semibold mb-4">📤 Export Passkey Info</h2>
+            <p className="text-sm opacity-60 mb-4">
+              Share these details with the wallet owner to add your passkey to their smart contract wallet
+            </p>
+
+            <div className="bg-base-100 rounded-xl p-4 space-y-3">
+              <div>
+                <p className="text-xs font-medium opacity-60 mb-1">Passkey Address</p>
+                <div className="flex items-center gap-2">
+                  <Address
+                    address={currentPasskey.passkeyAddress}
+                    chain={targetNetwork}
+                    blockExplorerAddressLink={
+                      targetNetwork.id === hardhat.id
+                        ? `/blockexplorer/address/${currentPasskey.passkeyAddress}`
+                        : undefined
+                    }
+                  />
+                </div>
+              </div>
+
+              <div>
+                <p className="text-xs font-medium opacity-60 mb-1">Public Key X (Qx)</p>
+                <div className="flex items-center gap-2">
+                  <code className="font-mono text-xs bg-base-200 p-2 rounded flex-1 break-all">
+                    {currentPasskey.qx}
+                  </code>
+                  <button
+                    className="btn btn-xs btn-ghost"
+                    onClick={() => navigator.clipboard.writeText(currentPasskey.qx)}
+                  >
+                    📋
+                  </button>
+                </div>
+              </div>
+
+              <div>
+                <p className="text-xs font-medium opacity-60 mb-1">Public Key Y (Qy)</p>
+                <div className="flex items-center gap-2">
+                  <code className="font-mono text-xs bg-base-200 p-2 rounded flex-1 break-all">
+                    {currentPasskey.qy}
+                  </code>
+                  <button
+                    className="btn btn-xs btn-ghost"
+                    onClick={() => navigator.clipboard.writeText(currentPasskey.qy)}
+                  >
+                    📋
+                  </button>
+                </div>
+              </div>
+
+              <div>
+                <p className="text-xs font-medium opacity-60 mb-1">Credential ID (Base64URL)</p>
+                <div className="flex items-center gap-2">
+                  <code className="font-mono text-xs bg-base-200 p-2 rounded flex-1 break-all">
+                    {currentPasskey.credentialId}
+                  </code>
+                  <button
+                    className="btn btn-xs btn-ghost"
+                    onClick={() => navigator.clipboard.writeText(currentPasskey.credentialId)}
+                  >
+                    📋
+                  </button>
+                </div>
+              </div>
+
+              {/* Copy All Button */}
+              <button
+                className="btn btn-sm btn-outline w-full mt-2"
+                onClick={() => {
+                  const exportData = JSON.stringify(
+                    {
+                      passkeyAddress: currentPasskey.passkeyAddress,
+                      qx: currentPasskey.qx,
+                      qy: currentPasskey.qy,
+                      credentialId: currentPasskey.credentialId,
+                    },
+                    null,
+                    2,
+                  );
+                  navigator.clipboard.writeText(exportData);
+                }}
+              >
+                📋 Copy All as JSON
+              </button>
+            </div>
+          </div>
+        )}
+
+        {/* Add External Passkey - Owner only */}
+        {isOwner && (
+          <div className="bg-base-200 rounded-3xl p-6 mb-8">
+            <h2 className="text-2xl font-semibold mb-4">📥 Add External Passkey</h2>
+            <p className="text-sm opacity-60 mb-4">
+              Add a passkey from another device. Get the Qx, Qy, and Credential ID from the other device&apos;s
+              &quot;Export Passkey Info&quot; section.
+            </p>
+
+            {/* Error Display */}
+            {externalPasskeyError && (
+              <div className="bg-error/10 border border-error rounded-xl p-4 mb-4">
+                <p className="text-error text-sm">{externalPasskeyError}</p>
+                <button className="btn btn-xs btn-ghost mt-2" onClick={() => setExternalPasskeyError(null)}>
+                  Dismiss
+                </button>
+              </div>
+            )}
+
+            {/* Success Display */}
+            {externalPasskeySuccess && (
+              <div className="bg-success/10 border border-success rounded-xl p-4 mb-4">
+                <p className="text-success text-sm">{externalPasskeySuccess}</p>
+                <button className="btn btn-xs btn-ghost mt-2" onClick={() => setExternalPasskeySuccess(null)}>
+                  Dismiss
+                </button>
+              </div>
+            )}
+
+            <div className="space-y-4">
+              {/* Qx Input */}
+              <div className="bg-base-100 rounded-xl p-4">
+                <p className="text-sm font-medium opacity-60 mb-2">Public Key X (Qx)</p>
+                <input
+                  type="text"
+                  placeholder="0x..."
+                  value={externalPasskeyQx}
+                  onChange={e => setExternalPasskeyQx(e.target.value)}
+                  className="input input-bordered w-full font-mono text-sm"
+                />
+                <p className="text-xs opacity-50 mt-1">32-byte hex string (0x + 64 hex characters)</p>
+              </div>
+
+              {/* Qy Input */}
+              <div className="bg-base-100 rounded-xl p-4">
+                <p className="text-sm font-medium opacity-60 mb-2">Public Key Y (Qy)</p>
+                <input
+                  type="text"
+                  placeholder="0x..."
+                  value={externalPasskeyQy}
+                  onChange={e => setExternalPasskeyQy(e.target.value)}
+                  className="input input-bordered w-full font-mono text-sm"
+                />
+                <p className="text-xs opacity-50 mt-1">32-byte hex string (0x + 64 hex characters)</p>
+              </div>
+
+              {/* Credential ID Input */}
+              <div className="bg-base-100 rounded-xl p-4">
+                <p className="text-sm font-medium opacity-60 mb-2">Credential ID (Base64URL)</p>
+                <input
+                  type="text"
+                  placeholder="abc123..."
+                  value={externalPasskeyCredentialId}
+                  onChange={e => setExternalPasskeyCredentialId(e.target.value)}
+                  className="input input-bordered w-full font-mono text-sm"
+                />
+                <p className="text-xs opacity-50 mt-1">Base64URL-encoded credential identifier from the passkey</p>
+              </div>
+
+              {/* Paste JSON Button */}
+              <button
+                className="btn btn-sm btn-outline w-full"
+                onClick={async () => {
+                  try {
+                    const text = await navigator.clipboard.readText();
+                    const data = JSON.parse(text);
+                    if (data.qx) setExternalPasskeyQx(data.qx);
+                    if (data.qy) setExternalPasskeyQy(data.qy);
+                    if (data.credentialId) setExternalPasskeyCredentialId(data.credentialId);
+                  } catch {
+                    setExternalPasskeyError("Failed to parse clipboard. Make sure you copied valid JSON.");
+                  }
+                }}
+              >
+                📋 Paste from JSON
+              </button>
+
+              {/* Add Button */}
+              <button
+                className="btn btn-primary w-full"
+                onClick={handleAddExternalPasskey}
+                disabled={
+                  isAddingExternalPasskey || !externalPasskeyQx || !externalPasskeyQy || !externalPasskeyCredentialId
+                }
+              >
+                {isAddingExternalPasskey ? (
+                  <>
+                    <span className="loading loading-spinner loading-sm"></span>
+                    Adding Passkey...
+                  </>
+                ) : (
+                  "Add External Passkey"
+                )}
+              </button>
+            </div>
+          </div>
+        )}
 
         {/* Pending Transaction Queue - Shows transactions from Impersonator, WalletConnect, etc. */}
         {pendingTransactions.length > 0 && (

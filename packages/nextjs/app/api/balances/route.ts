@@ -1,5 +1,8 @@
+import { OPTIONS, jsonResponse } from "../cors";
 import { createPublicClient, formatEther, formatUnits, http, isAddress } from "viem";
 import { base } from "viem/chains";
+
+export { OPTIONS };
 
 // USDC contract address on Base
 const USDC_ADDRESS = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913" as const;
@@ -30,11 +33,11 @@ export async function GET(request: Request) {
 
     // Validate address
     if (!address) {
-      return Response.json({ error: "Missing address parameter" }, { status: 400 });
+      return jsonResponse({ error: "Missing address parameter" }, 400);
     }
 
     if (!isAddress(address)) {
-      return Response.json({ error: "Invalid address format" }, { status: 400 });
+      return jsonResponse({ error: "Invalid address format" }, 400);
     }
 
     const rpcUrl = getRpcUrl();
@@ -54,7 +57,7 @@ export async function GET(request: Request) {
       }),
     ]);
 
-    return Response.json({
+    return jsonResponse({
       address,
       balances: {
         eth: {
@@ -73,12 +76,12 @@ export async function GET(request: Request) {
     });
   } catch (error) {
     console.error("[Balances API] Error:", error);
-    return Response.json(
+    return jsonResponse(
       {
         error: "Failed to fetch balances",
         details: error instanceof Error ? error.message : String(error),
       },
-      { status: 500 },
+      500,
     );
   }
 }
