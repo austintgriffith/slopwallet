@@ -90,6 +90,83 @@ Check which candidate passkey public keys are registered on a smart wallet. Used
 
 ---
 
+#### `POST /api/passkey/recover`
+
+Recover passkey public key from raw WebAuthn assertion data. Enables API-only passkey login where the client sends raw WebAuthn data and the server recovers the public key and checks which one is registered on-chain.
+
+**Request:**
+
+```json
+{
+  "wallet": "0x...",
+  "chainId": 8453,
+  "signature": {
+    "r": "0x...",
+    "s": "0x..."
+  },
+  "authenticatorData": "0x...",
+  "clientDataJSON": "{\"type\":\"webauthn.get\",...}"
+}
+```
+
+**Response (success):**
+
+```json
+{
+  "qx": "0x...",
+  "qy": "0x...",
+  "passkeyAddress": "0x...",
+  "wallet": "0x...",
+  "chainId": 8453
+}
+```
+
+**Response (no match found):**
+
+```json
+{
+  "error": "No registered passkey found among recovered candidates",
+  "candidates": [{ "qx": "0x...", "qy": "0x...", "passkeyAddress": "0x..." }],
+  "wallet": "0x...",
+  "chainId": 8453
+}
+```
+
+**Client example:**
+
+```typescript
+const assertionResponse = assertion.response as AuthenticatorAssertionResponse;
+const { r, s } = parseAsn1Signature(assertionResponse.signature);
+
+const response = await fetch(`${SLOPWALLET_API}/passkey/recover`, {
+  method: "POST",
+  headers: { "Content-Type": "application/json" },
+  body: JSON.stringify({
+    wallet: smartContractWallet,
+    chainId: 8453,
+    signature: {
+      r: "0x" + r.toString(16).padStart(64, "0"),
+      s: "0x" + s.toString(16).padStart(64, "0"),
+    },
+    authenticatorData:
+      "0x" +
+      Array.from(new Uint8Array(assertionResponse.authenticatorData))
+        .map((b) => b.toString(16).padStart(2, "0"))
+        .join(""),
+    clientDataJSON: new TextDecoder().decode(assertionResponse.clientDataJSON),
+  }),
+});
+```
+
+**Notes:**
+
+- Server computes `sha256(authenticatorData || sha256(clientDataJSON))` and recovers up to 4 candidate public keys
+- Each candidate is checked against the smart wallet's `isPasskey()` function
+- Returns 404 with all candidates if no registered passkey matches
+- Supported chains: Base (8453), Ethereum Mainnet (1)
+
+---
+
 #### `GET /api/nonce`
 
 Get the current nonce for a passkey on a smart wallet.
