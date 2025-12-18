@@ -301,6 +301,70 @@ Generate calldata for an ETH or USDC transfer.
 
 ---
 
+#### `POST /api/prepare-transfer`
+
+Consolidate transfer preparation into a single call. Combines what `/transfer` and `/nonce` do, plus computes the challenge hash for WebAuthn signing. This enables clients to prepare a transfer without a viem dependency.
+
+**Request:**
+
+```json
+{
+  "chainId": 8453,
+  "wallet": "0xSmartWalletAddress",
+  "qx": "0x...",
+  "qy": "0x...",
+  "asset": "USDC",
+  "amount": "10.00",
+  "to": "0xRecipientAddress"
+}
+```
+
+**Response:**
+
+```json
+{
+  "success": true,
+  "call": {
+    "target": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+    "value": "0",
+    "data": "0xa9059cbb..."
+  },
+  "nonce": "5",
+  "deadline": "1734567890",
+  "challengeHash": "0x..."
+}
+```
+
+**Logic:**
+
+1. Looks up the USDC contract address for the given `chainId`
+2. Encodes the ERC20 `transfer(to, amount)` calldata (or native ETH transfer)
+3. Derives passkey address from `qx`/`qy` and fetches the current nonce from the wallet
+4. Sets `deadline` to now + 1 hour
+5. Computes `challengeHash` using:
+
+```
+keccak256(concat([
+  toHex(chainId, { size: 32 }),
+  wallet,                        // 20 bytes
+  target,                        // 20 bytes
+  toHex(value, { size: 32 }),    // 0 for ERC20 transfers
+  data,                          // variable length transfer calldata
+  toHex(nonce, { size: 32 }),
+  toHex(deadline, { size: 32 }),
+]))
+```
+
+This is the same hash format the smart wallet contract expects for signature verification.
+
+**Notes:**
+
+- Supported chains: Base (8453), Ethereum Mainnet (1)
+- Supported assets: ETH, USDC
+- USDC uses 6 decimals, ETH uses 18 decimals
+
+---
+
 ### Swap Endpoints
 
 #### `GET /api/swap/quote`
