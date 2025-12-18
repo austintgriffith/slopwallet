@@ -1,73 +1,434 @@
 # SlopWallet.com
 
-> an experiment with smart contract wallet factories, wallet connecting, and eventually passkey verification
+> an experiment with smart contract wallet factories, wallet connecting, and passkey verification
 
-# built with 🏗 Scaffold-ETH 2
+Built with Scaffold-ETH 2.
 
 ## Quickstart
 
-To get started with Scaffold-ETH 2, follow the steps below:
-
-1. Install dependencies if it was skipped in CLI:
+1. Install dependencies:
 
 ```
-cd my-dapp-example
 yarn install
 ```
 
-2. Run a local network in the first terminal:
+2. Run a local network:
 
 ```
 yarn chain
 ```
 
-This command starts a local Ethereum network using Foundry. The network runs on your local machine and can be used for testing and development. You can customize the network configuration in `packages/foundry/foundry.toml`.
-
-3. On a second terminal, deploy the test contract:
+3. Deploy the contracts:
 
 ```
 yarn deploy
 ```
 
-This command deploys a test smart contract to the local network. The contract is located in `packages/foundry/contracts` and can be modified to suit your needs. The `yarn deploy` command uses the deploy script located in `packages/foundry/script` to deploy the contract to the network. You can also customize the deploy script.
-
-4. Configure environment variables:
-
-Create a `.env.local` file in `packages/nextjs/` with:
+4. Configure environment variables in `packages/nextjs/.env.local`:
 
 ```
-# Alchemy API key for RPC access
 NEXT_PUBLIC_ALCHEMY_API_KEY=your_alchemy_api_key
-
-# Facilitator private key for gasless transactions (server-side only)
 FACILITATOR_PRIVATE_KEY=0x...
-
-# Unblind API key for transaction analysis (server-side only)
-UNBLIND_API_KEY=your_unblind_api_key
+ANTHROPIC_API_KEY=your_anthropic_api_key
 ```
 
-5. On a third terminal, start your NextJS app:
+5. Start the app:
 
 ```
 yarn start
 ```
 
-Visit your app on: `http://localhost:3000`. You can interact with your smart contract using the `Debug Contracts` page. You can tweak the app config in `packages/nextjs/scaffold.config.ts`.
+Visit `http://localhost:3000`
 
-Run smart contract test with `yarn foundry:test`
+---
 
-- Edit your smart contracts in `packages/foundry/contracts`
-- Edit your frontend homepage at `packages/nextjs/app/page.tsx`. For guidance on [routing](https://nextjs.org/docs/app/building-your-application/routing/defining-routes) and configuring [pages/layouts](https://nextjs.org/docs/app/building-your-application/routing/pages-and-layouts) checkout the Next.js documentation.
-- Edit your deployment scripts in `packages/foundry/script`
+## API Reference
 
-## Documentation
+All endpoints support CORS and return JSON. Base URL: `/api`
 
-Visit our [docs](https://docs.scaffoldeth.io) to learn how to start building with Scaffold-ETH 2.
+### Passkey Endpoints
 
-To know more about its features, check out our [website](https://scaffoldeth.io).
+#### `POST /api/passkey/check`
 
-## Contributing to Scaffold-ETH 2
+Check which candidate passkey public keys are registered on a smart wallet. Used for API-only passkey login flows where you recover candidate keys from a signature.
 
-We welcome contributions to Scaffold-ETH 2!
+**Request:**
 
-Please see [CONTRIBUTING.MD](https://github.com/scaffold-eth/scaffold-eth-2/blob/main/CONTRIBUTING.md) for more information and guidelines for contributing to Scaffold-ETH 2.
+```json
+{
+  "wallet": "0x...",
+  "chainId": 8453,
+  "candidates": [
+    { "qx": "0x...", "qy": "0x..." },
+    { "qx": "0x...", "qy": "0x..." }
+  ]
+}
+```
+
+**Response:**
+
+```json
+{
+  "matches": [
+    {
+      "qx": "0x...",
+      "qy": "0x...",
+      "passkeyAddress": "0x...",
+      "isPasskey": true
+    }
+  ],
+  "wallet": "0x...",
+  "chainId": 8453
+}
+```
+
+**Notes:**
+
+- Maximum 10 candidates per request
+- `qx` and `qy` must be 32-byte hex strings (66 chars with `0x` prefix)
+- Supported chains: Base (8453), Ethereum Mainnet (1)
+
+---
+
+#### `GET /api/nonce`
+
+Get the current nonce for a passkey on a smart wallet.
+
+**Query params:**
+
+- `wallet` (required): Smart wallet address
+- `chainId` (optional): Chain ID (default: 8453)
+- `passkey`: Passkey address, OR
+- `qx` + `qy`: Public key coordinates
+
+**Response:**
+
+```json
+{
+  "nonce": "1",
+  "passkeyAddress": "0x...",
+  "wallet": "0x...",
+  "chainId": 8453
+}
+```
+
+---
+
+#### `POST /api/facilitate`
+
+Submit a gasless meta-transaction signed by a passkey. The facilitator pays the gas.
+
+**Request:**
+
+```json
+{
+  "smartWalletAddress": "0x...",
+  "chainId": 8453,
+  "isBatch": false,
+  "calls": [{ "target": "0x...", "value": "0", "data": "0x..." }],
+  "qx": "0x...",
+  "qy": "0x...",
+  "deadline": "1234567890",
+  "auth": {
+    "r": "0x...",
+    "s": "0x...",
+    "challengeIndex": "36",
+    "typeIndex": "1",
+    "authenticatorData": "0x...",
+    "clientDataJSON": "..."
+  }
+}
+```
+
+**Response:**
+
+```json
+{
+  "success": true,
+  "txHash": "0x...",
+  "blockNumber": "12345",
+  "gasUsed": "50000"
+}
+```
+
+**Notes:**
+
+- Only whitelisted smart wallets are supported
+- Verifies WebAuthn signature cryptographically before submitting
+
+---
+
+### Balance & Token Endpoints
+
+#### `GET /api/balances`
+
+Get ETH and USDC balances for an address on Base.
+
+**Query params:**
+
+- `address` (required): Ethereum address
+
+**Response:**
+
+```json
+{
+  "address": "0x...",
+  "balances": {
+    "eth": {
+      "raw": "1000000000000000000",
+      "formatted": "1.0",
+      "symbol": "ETH",
+      "decimals": 18
+    },
+    "usdc": {
+      "raw": "1000000",
+      "formatted": "1.0",
+      "symbol": "USDC",
+      "decimals": 6
+    }
+  }
+}
+```
+
+---
+
+#### `POST /api/transfer`
+
+Generate calldata for an ETH or USDC transfer.
+
+**Request:**
+
+```json
+{
+  "asset": "ETH",
+  "amount": "0.1",
+  "to": "0x..."
+}
+```
+
+**Response:**
+
+```json
+{
+  "success": true,
+  "asset": "ETH",
+  "amount": "0.1",
+  "to": "0x...",
+  "call": {
+    "target": "0x...",
+    "value": "100000000000000000",
+    "data": "0x"
+  }
+}
+```
+
+---
+
+### Swap Endpoints
+
+#### `GET /api/swap/quote`
+
+Get a quote for swapping ETH <-> USDC on Base via Uniswap V3.
+
+**Query params:**
+
+- `from` (required): "ETH" or "USDC"
+- `to` (required): "ETH" or "USDC"
+- `amountIn` (required): Amount to swap (human readable)
+
+**Response:**
+
+```json
+{
+  "from": "ETH",
+  "to": "USDC",
+  "amountIn": "0.1",
+  "amountInRaw": "100000000000000000",
+  "amountOut": "350.25",
+  "amountOutRaw": "350250000",
+  "pricePerToken": "3502.50",
+  "fee": "0.05%",
+  "gasEstimate": "150000"
+}
+```
+
+---
+
+#### `POST /api/swap`
+
+Generate calldata for an ETH <-> USDC swap.
+
+**Request:**
+
+```json
+{
+  "from": "ETH",
+  "to": "USDC",
+  "amountIn": "0.1",
+  "amountOutMinimum": "340",
+  "recipient": "0x..."
+}
+```
+
+**Response:**
+
+```json
+{
+  "success": true,
+  "from": "ETH",
+  "to": "USDC",
+  "amountIn": "0.1",
+  "amountOutMinimum": "340",
+  "recipient": "0x...",
+  "calls": [
+    { "target": "0x...", "value": "100000000000000000", "data": "0x..." }
+  ]
+}
+```
+
+**Notes:**
+
+- USDC -> ETH requires 3 calls (approve, swap, unwrap)
+- ETH -> USDC requires 1 call
+
+---
+
+### ENS Endpoint
+
+#### `GET /api/ens`
+
+Resolve ENS names to addresses or addresses to ENS names.
+
+**Query params:**
+
+- `query` (required): ENS name (e.g., `vitalik.eth`) or Ethereum address
+
+**Response (forward resolution):**
+
+```json
+{
+  "query": "vitalik.eth",
+  "address": "0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045",
+  "ensName": "vitalik.eth",
+  "type": "forward"
+}
+```
+
+**Response (reverse resolution):**
+
+```json
+{
+  "query": "0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045",
+  "address": "0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045",
+  "ensName": "vitalik.eth",
+  "type": "reverse"
+}
+```
+
+---
+
+### AI Agent Endpoint
+
+#### `POST /api/agent`
+
+Natural language transaction generation using Claude.
+
+**Request:**
+
+```json
+{
+  "prompt": "Send 0.1 ETH to vitalik.eth",
+  "walletAddress": "0x..."
+}
+```
+
+**Response (transaction):**
+
+```json
+{
+  "calls": [{ "target": "0x...", "value": "100000000000000000", "data": "0x" }]
+}
+```
+
+**Response (information):**
+
+```json
+{
+  "response": "Your current balance is 1.5 ETH and 500 USDC."
+}
+```
+
+**Notes:**
+
+- Requires `ANTHROPIC_API_KEY` environment variable
+- Automatically fetches wallet holdings for context
+
+---
+
+### Transaction Analysis Endpoint
+
+#### `POST /api/unblind`
+
+Analyze a transaction or message signature for security risks using Unblind.
+
+**Request (transaction):**
+
+```json
+{
+  "type": "transaction",
+  "chainId": "8453",
+  "from": "0x...",
+  "to": "0x...",
+  "value": "0x0",
+  "data": "0x..."
+}
+```
+
+**Request (message):**
+
+```json
+{
+  "type": "message",
+  "signatureMethod": "eth_signTypedData_v4",
+  "from": "0x...",
+  "data": { ... }
+}
+```
+
+**Response:**
+
+```json
+{
+  "analysis": "This transaction transfers 100 USDC to 0x...",
+  "warnings": []
+}
+```
+
+---
+
+## Passkey Public Key Recovery
+
+When logging in with an existing passkey, WebAuthn only returns a signature - not the public key. To derive `qx`/`qy`:
+
+1. From one ECDSA signature on P-256, recover up to 4 candidate public keys
+2. Check which candidate is registered on-chain via `/api/passkey/check`
+3. If no match, get a second signature - only one candidate will verify both
+
+**Libraries needed:**
+
+```typescript
+import { p256 } from "@noble/curves/nist.js";
+import { sha256 } from "@noble/hashes/sha2.js";
+
+// Recover from signature
+const sig = new p256.Signature(r, s, recoveryBit);
+const pubKey = sig.recoverPublicKey(messageHash);
+```
+
+See `packages/nextjs/utils/passkey.ts` for the full implementation.
+
+---
+
+## Contributing
+
+See [CONTRIBUTING.MD](https://github.com/scaffold-eth/scaffold-eth-2/blob/main/CONTRIBUTING.md)

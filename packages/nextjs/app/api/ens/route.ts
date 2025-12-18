@@ -1,17 +1,16 @@
 import { OPTIONS, jsonResponse } from "../cors";
-import { createPublicClient, http, isAddress } from "viem";
+import { createPublicClient, fallback, http, isAddress } from "viem";
 import { mainnet } from "viem/chains";
 import { normalize } from "viem/ens";
 
 export { OPTIONS };
 
-function getRpcUrl(): string {
-  const alchemyKey = process.env.ALCHEMY_API_KEY;
-  if (alchemyKey) {
-    return `https://eth-mainnet.g.alchemy.com/v2/${alchemyKey}`;
-  }
-  return "https://cloudflare-eth.com";
-}
+// Build fallback transport chain: BuidlGuidl -> Alchemy (if available) -> Cloudflare
+const transports = [
+  http("https://mainnet.rpc.buidlguidl.com"),
+  ...(process.env.ALCHEMY_API_KEY ? [http(`https://eth-mainnet.g.alchemy.com/v2/${process.env.ALCHEMY_API_KEY}`)] : []),
+  http("https://cloudflare-eth.com"),
+];
 
 export async function GET(request: Request) {
   try {
@@ -27,7 +26,7 @@ export async function GET(request: Request) {
 
     const publicClient = createPublicClient({
       chain: mainnet,
-      transport: http(getRpcUrl()),
+      transport: fallback(transports),
     });
 
     // Detect if input is an ENS name or an address
