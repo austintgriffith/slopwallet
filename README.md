@@ -365,6 +365,73 @@ This is the same hash format the smart wallet contract expects for signature ver
 
 ---
 
+#### `POST /api/prepare-call`
+
+Prepare arbitrary transaction data for passkey signing. Supports both single calls (from `eth_sendTransaction`) and batch calls (from `wallet_sendCalls` / EIP-5792). This is the generic version of `/api/prepare-transfer` for any contract interaction.
+
+**Request (single call):**
+
+```json
+{
+  "chainId": 8453,
+  "wallet": "0xSmartWalletAddress",
+  "qx": "0x...",
+  "qy": "0x...",
+  "target": "0xContractAddress",
+  "value": "0",
+  "data": "0xa9059cbb..."
+}
+```
+
+**Request (batch calls):**
+
+```json
+{
+  "chainId": 8453,
+  "wallet": "0xSmartWalletAddress",
+  "qx": "0x...",
+  "qy": "0x...",
+  "calls": [
+    { "target": "0xTokenContract", "value": "0", "data": "0x095ea7b3..." },
+    { "target": "0xSwapRouter", "value": "0", "data": "0x414bf389..." }
+  ]
+}
+```
+
+**Response:**
+
+```json
+{
+  "success": true,
+  "isBatch": false,
+  "calls": [{ "target": "0x...", "value": "0", "data": "0x..." }],
+  "nonce": "5",
+  "deadline": "1734567890",
+  "challengeHash": "0x..."
+}
+```
+
+**Logic:**
+
+1. Accepts either a single call (`target`, `value`, `data`) or batch calls (`calls` array)
+2. Derives passkey address from `qx`/`qy` and fetches the current nonce
+3. Sets `deadline` to now + 1 hour
+4. Computes `challengeHash`:
+   - Single tx: `keccak256(abi.encodePacked(chainId, wallet, target, value, data, nonce, deadline))`
+   - Batch tx: `keccak256(abi.encodePacked(chainId, wallet, keccak256(abi.encode(calls)), nonce, deadline))`
+
+**Use case:**
+
+This endpoint enables external clients (mobile apps, CLI tools) to prepare WalletConnect transactions for passkey signing without needing viem or complex client-side logic.
+
+**Notes:**
+
+- Supported chains: Base (8453), Ethereum Mainnet (1)
+- Single-item `calls` arrays are treated as single transactions (not batch)
+- The `challengeHash` is what the passkey signs via WebAuthn
+
+---
+
 ### Swap Endpoints
 
 #### `GET /api/swap/quote`
