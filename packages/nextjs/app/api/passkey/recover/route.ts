@@ -4,6 +4,7 @@ import { sha256 } from "@noble/hashes/sha2.js";
 import { Chain, concat, createPublicClient, http, isAddress, keccak256 } from "viem";
 import { base, mainnet } from "viem/chains";
 import { SMART_WALLET_ABI } from "~~/contracts/SmartWalletAbi";
+import { DEFAULT_ALCHEMY_API_KEY } from "~~/scaffold.config";
 
 export { OPTIONS };
 
@@ -28,17 +29,18 @@ function derivePasskeyAddress(qx: `0x${string}`, qy: `0x${string}`): `0x${string
 
 // Get RPC URL for a chain
 function getRpcUrl(chainId: number): string {
-  const alchemyApiKey = process.env.ALCHEMY_API_KEY || process.env.NEXT_PUBLIC_ALCHEMY_API_KEY;
+  const alchemyApiKey =
+    process.env.ALCHEMY_API_KEY || process.env.NEXT_PUBLIC_ALCHEMY_API_KEY || DEFAULT_ALCHEMY_API_KEY;
 
   if (chainId === base.id) {
-    return alchemyApiKey ? `https://base-mainnet.g.alchemy.com/v2/${alchemyApiKey}` : "https://mainnet.base.org";
+    return `https://base-mainnet.g.alchemy.com/v2/${alchemyApiKey}`;
   }
   if (chainId === mainnet.id) {
     return "https://mainnet.rpc.buidlguidl.com";
   }
 
   // Fallback to base
-  return alchemyApiKey ? `https://base-mainnet.g.alchemy.com/v2/${alchemyApiKey}` : "https://mainnet.base.org";
+  return `https://base-mainnet.g.alchemy.com/v2/${alchemyApiKey}`;
 }
 
 /**

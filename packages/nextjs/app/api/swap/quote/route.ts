@@ -1,6 +1,7 @@
 import { OPTIONS, jsonResponse } from "../../cors";
 import { createPublicClient, formatEther, formatUnits, http, parseEther, parseUnits } from "viem";
 import { base } from "viem/chains";
+import { DEFAULT_ALCHEMY_API_KEY } from "~~/scaffold.config";
 
 export { OPTIONS };
 
@@ -38,11 +39,8 @@ const QUOTER_V2_ABI = [
 ] as const;
 
 function getRpcUrl(): string {
-  const alchemyKey = process.env.ALCHEMY_API_KEY;
-  if (alchemyKey) {
-    return `https://base-mainnet.g.alchemy.com/v2/${alchemyKey}`;
-  }
-  return "https://mainnet.base.org";
+  const alchemyKey = process.env.ALCHEMY_API_KEY || process.env.NEXT_PUBLIC_ALCHEMY_API_KEY || DEFAULT_ALCHEMY_API_KEY;
+  return `https://base-mainnet.g.alchemy.com/v2/${alchemyKey}`;
 }
 
 export async function GET(request: Request) {
